@@ -1,0 +1,85 @@
+{
+    "current_file": "C:/Users/adamm/projects/3D Ultrasound Scrapper/data/IM-0001-0017.dcm",
+    "pixel_type": "8 bit unsigned",
+    "endianness": "Little endian",
+    "header_size": 224999,
+    "footer_size": 0,
+    "width": 424,
+    "height": 127,
+    "row_stride": 0,
+    "row_padding": 0,
+    "depth": 317,
+    "skip_slices": 0,
+    "slice_stride": 432,
+    "spacing_x": 3.0,
+    "spacing_y": 1.0,
+    "spacing_z": 1.0,
+    "brightness": 0,
+    "contrast": 100,
+    "gamma": 100,
+    "window_min": 0,
+    "window_max": 100,
+    "scale_x": 1.0,
+    "scale_y": 1.0,
+    "scale_z": 1.0,
+    "preserve_size": true,
+    "curve_x_pos": 20,
+    "curve_x_neg": 20,
+    "curve_y_pos": 0,
+    "curve_y_neg": 0,
+    "curve_z_pos": 0,
+    "curve_z_neg": 0,
+    "use_corner_symmetry": true,
+    "show_corner_notes": true,
+    "corner_positions": [
+        [
+            -16.0,
+            0.0,
+            -20.0
+        ],
+        [
+            142.0,
+            0.0,
+            -20.0
+        ],
+        [
+            0.0,
+            423.0,
+            0.0
+        ],
+        [
+            126.0,
+            423.0,
+            0.0
+        ],
+        [
+            -16.0,
+            0.0,
+            336.0
+        ],
+        [
+            142.0,
+            0.0,
+            336.0
+        ],
+        [
+            0.0,
+            423.0,
+            316.0
+        ],
+        [
+            126.0,
+            423.0,
+            316.0
+        ]
+    ],
+    "selected_corner_index": 0,
+    "auto_update": true,
+    "orientation_ops": [
+        [
+            "rotate",
+            "z",
+            -1
+        ]
+    ]
+}
