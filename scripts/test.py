@@ -1,7 +1,7 @@
+import argparse
+import json
 import os
 import sys
-import json
-import argparse
 
 import numpy as np
 from matplotlib.backends.backend_qt5agg import (
@@ -54,6 +54,12 @@ class RawImageGuessQt(QMainWindow):
         self.vmin = None
         self.vmax = None
 
+        # Overlay image functionality
+        self.overlay_data = None
+        self.overlay_alpha = 0.5
+        self.overlay_enabled = False
+        self.overlay_file_path = ""
+
         # Orientation history (persist flips/rotations)
         self.orientation_ops = []
         self._last_load_reason = None
@@ -90,6 +96,10 @@ class RawImageGuessQt(QMainWindow):
         self.curve_y_neg = 0.0  # Curve along Y axis in negative direction
         self.curve_z_pos = 0.0  # Curve along Z axis in positive direction
         self.curve_z_neg = 0.0  # Curve along Z axis in negative direction
+
+        # Crop state
+        self.crop_top = 0  # Pixels to crop from top
+        self.crop_bottom = 0  # Pixels to crop from bottom
 
         self.init_ui()
 
@@ -349,7 +359,9 @@ class RawImageGuessQt(QMainWindow):
         )
         corner_layout.addWidget(self.corner_notes_checkbox, 0, 0, 1, 2)
 
-        self.corner_symmetry_checkbox = QCheckBox("Use symmetry (C000+C010 control all)")
+        self.corner_symmetry_checkbox = QCheckBox(
+            "Use symmetry (C000+C010 control all)"
+        )
         self.corner_symmetry_checkbox.setChecked(True)
         self.corner_symmetry_checkbox.toggled.connect(
             self.on_corner_symmetry_toggled
@@ -405,7 +417,9 @@ class RawImageGuessQt(QMainWindow):
         corner_layout.addWidget(reset_corners_btn, 5, 0, 1, 2)
 
         # Help text for symmetry
-        help_label = QLabel("Symmetry: C000 & C010 control all 8 corners via center mirroring")
+        help_label = QLabel(
+            "Symmetry: C000 & C010 control all 8 corners via center mirroring"
+        )
         help_label.setWordWrap(True)
         help_label.setStyleSheet("color: #666; font-size: 9px;")
         corner_layout.addWidget(help_label, 6, 0, 1, 4)
@@ -528,12 +542,62 @@ class RawImageGuessQt(QMainWindow):
         curve_layout.addWidget(reset_curves_btn, 6, 0, 1, 2)
 
         # Help text
-        help_curve_label = QLabel("Curve values bend the volume. + curves forward, - curves backward.")
+        help_curve_label = QLabel(
+            "Curve values bend the volume. + curves forward, - curves backward."
+        )
         help_curve_label.setWordWrap(True)
         help_curve_label.setStyleSheet("color: #666; font-size: 9px;")
         curve_layout.addWidget(help_curve_label, 7, 0, 1, 4)
 
         layout.addWidget(curve_group)
+
+        # Crop group
+        crop_group = QGroupBox("Crop (Top/Bottom)")
+        crop_layout = QGridLayout(crop_group)
+
+        # Crop from top
+        crop_layout.addWidget(QLabel("Crop Top:"), 0, 0)
+        self.crop_top_slider = self.create_slider(
+            0, 500, 0, self.on_crop_changed
+        )
+        crop_layout.addWidget(self.crop_top_slider, 0, 1)
+        self.crop_top_label = QLabel("0")
+        crop_layout.addWidget(self.crop_top_label, 0, 2)
+        crop_layout.addLayout(
+            self.create_slider_controls(self.crop_top_slider), 0, 3
+        )
+
+        # Crop from bottom
+        crop_layout.addWidget(QLabel("Crop Bottom:"), 1, 0)
+        self.crop_bottom_slider = self.create_slider(
+            0, 500, 0, self.on_crop_changed
+        )
+        crop_layout.addWidget(self.crop_bottom_slider, 1, 1)
+        self.crop_bottom_label = QLabel("0")
+        crop_layout.addWidget(self.crop_bottom_label, 1, 2)
+        crop_layout.addLayout(
+            self.create_slider_controls(self.crop_bottom_slider), 1, 3
+        )
+
+        # Reset button
+        reset_crop_btn = QPushButton("Reset Crop")
+        reset_crop_btn.clicked.connect(self.reset_crop)
+        crop_layout.addWidget(reset_crop_btn, 2, 0, 1, 2)
+
+        # Apply button (permanent crop)
+        apply_crop_btn = QPushButton("Apply Crop (Permanent)")
+        apply_crop_btn.clicked.connect(self.apply_crop)
+        crop_layout.addWidget(apply_crop_btn, 2, 2, 1, 2)
+
+        # Help text
+        help_crop_label = QLabel(
+            "Preview crop in realtime. Apply to permanently modify the volume."
+        )
+        help_crop_label.setWordWrap(True)
+        help_crop_label.setStyleSheet("color: #666; font-size: 9px;")
+        crop_layout.addWidget(help_crop_label, 3, 0, 1, 4)
+
+        layout.addWidget(crop_group)
 
         # Image enhancement
         enhancement_group = QGroupBox("Image Enhancement")
@@ -599,6 +663,51 @@ class RawImageGuessQt(QMainWindow):
         enhancement_layout.addWidget(reset_enhancement_btn, 5, 0, 1, 4)
 
         layout.addWidget(enhancement_group)
+
+        # Overlay Image group (View-only - not affected by transformations or exported)
+        overlay_group = QGroupBox("Overlay Image (View Only)")
+        overlay_layout = QGridLayout(overlay_group)
+
+        # Overlay file selection
+        overlay_layout.addWidget(QLabel("Overlay File:"), 0, 0)
+        self.overlay_file_label = QLabel("No overlay selected")
+        self.overlay_file_label.setWordWrap(True)
+        overlay_layout.addWidget(self.overlay_file_label, 0, 1, 1, 2)
+
+        overlay_buttons_layout = QHBoxLayout()
+        self.browse_overlay_button = QPushButton("Browse Overlay")
+        self.browse_overlay_button.clicked.connect(self.browse_overlay_file)
+        overlay_buttons_layout.addWidget(self.browse_overlay_button)
+
+        self.clear_overlay_button = QPushButton("Clear Overlay")
+        self.clear_overlay_button.clicked.connect(self.clear_overlay)
+        overlay_buttons_layout.addWidget(self.clear_overlay_button)
+        overlay_layout.addLayout(overlay_buttons_layout, 1, 0, 1, 3)
+
+        # Enable overlay checkbox
+        self.overlay_enabled_checkbox = QCheckBox("Enable Overlay")
+        self.overlay_enabled_checkbox.setChecked(False)
+        self.overlay_enabled_checkbox.toggled.connect(self.on_overlay_toggled)
+        overlay_layout.addWidget(self.overlay_enabled_checkbox, 2, 0, 1, 3)
+
+        # Overlay transparency
+        overlay_layout.addWidget(QLabel("Transparency:"), 3, 0)
+        self.overlay_alpha_slider = self.create_slider(
+            0, 100, 50, self.on_overlay_alpha_changed
+        )
+        overlay_layout.addWidget(self.overlay_alpha_slider, 3, 1)
+        self.overlay_alpha_label = QLabel("50%")
+        overlay_layout.addWidget(self.overlay_alpha_label, 3, 2)
+
+        # Help text for overlay
+        help_overlay_label = QLabel(
+            "Overlay is for visual reference only. Not affected by transformations and never exported."
+        )
+        help_overlay_label.setWordWrap(True)
+        help_overlay_label.setStyleSheet("color: #666; font-size: 9px;")
+        overlay_layout.addWidget(help_overlay_label, 4, 0, 1, 3)
+
+        layout.addWidget(overlay_group)
 
         # Auto update and actions
         self.auto_update_checkbox = QCheckBox("Auto Update")
@@ -781,6 +890,7 @@ class RawImageGuessQt(QMainWindow):
         self.update_slider_labels()
         self.update_enhancement_labels()
         self.update_curve_labels()
+        self.update_crop_labels()
         self.reset_corners_to_default()
         self.setup_corner_slider_ranges()
         self.update_corner_combo_items()
@@ -832,23 +942,23 @@ class RawImageGuessQt(QMainWindow):
 
     def on_parameter_changed(self):
         self.update_slider_labels()
-        sender = getattr(self, 'sender', lambda: None)()
+        sender = getattr(self, "sender", lambda: None)()
         sender_name = None
         sender_value = None
         if sender is self.spacing_x_spin:
-            sender_name = 'spacing_x'
+            sender_name = "spacing_x"
             sender_value = self.spacing_x_spin.value()
         elif sender is self.spacing_y_spin:
-            sender_name = 'spacing_y'
+            sender_name = "spacing_y"
             sender_value = self.spacing_y_spin.value()
         elif sender is self.spacing_z_spin:
-            sender_name = 'spacing_z'
+            sender_name = "spacing_z"
             sender_value = self.spacing_z_spin.value()
         else:
             try:
                 sender_name = sender.objectName() or sender.__class__.__name__
             except Exception:
-                sender_name = 'unknown'
+                sender_name = "unknown"
         if self.auto_update_checkbox.isChecked():
             self._last_load_reason = f"auto_update from {sender_name}"
             self.load_image()
@@ -934,9 +1044,128 @@ class RawImageGuessQt(QMainWindow):
 
     def are_curves_active(self):
         """Check if any curve deformations are active"""
-        return (abs(self.curve_x_pos) > 1e-6 or abs(self.curve_x_neg) > 1e-6 or
-                abs(self.curve_y_pos) > 1e-6 or abs(self.curve_y_neg) > 1e-6 or
-                abs(self.curve_z_pos) > 1e-6 or abs(self.curve_z_neg) > 1e-6)
+        return (
+            abs(self.curve_x_pos) > 1e-6
+            or abs(self.curve_x_neg) > 1e-6
+            or abs(self.curve_y_pos) > 1e-6
+            or abs(self.curve_y_neg) > 1e-6
+            or abs(self.curve_z_pos) > 1e-6
+            or abs(self.curve_z_neg) > 1e-6
+        )
+
+    def update_crop_labels(self):
+        """Update crop slider labels"""
+        self.crop_top_label.setText(str(self.crop_top_slider.value()))
+        self.crop_bottom_label.setText(str(self.crop_bottom_slider.value()))
+
+    def on_crop_changed(self):
+        """Handle crop slider changes"""
+        self.update_crop_labels()
+        self.update_crop_parameters()
+        if self.image_data is not None:
+            self.update_slice_display()
+
+    def update_crop_parameters(self):
+        """Update internal crop parameters from sliders"""
+        self.crop_top = self.crop_top_slider.value()
+        self.crop_bottom = self.crop_bottom_slider.value()
+
+    def reset_crop(self):
+        """Reset all crop values to zero"""
+        self.crop_top_slider.setValue(0)
+        self.crop_bottom_slider.setValue(0)
+
+    def apply_crop(self):
+        """Apply crop permanently to the image data"""
+        if self.image_data is None:
+            QMessageBox.warning(self, "Warning", "No image data to crop.")
+            return
+
+        if self.crop_top == 0 and self.crop_bottom == 0:
+            self.status_text.append(
+                "Crop: no cropping to apply (both values are 0)."
+            )
+            return
+
+        try:
+            original_shape = self.image_data.shape
+            D, H, W = original_shape[:3]
+
+            # Validate crop values
+            total_crop = self.crop_top + self.crop_bottom
+            if total_crop >= H:
+                QMessageBox.warning(
+                    self,
+                    "Invalid Crop",
+                    f"Total crop ({total_crop}) must be less than image height ({H}).",
+                )
+                return
+
+            # Calculate new height
+            new_height = H - total_crop
+            start_row = self.crop_top
+            end_row = H - self.crop_bottom
+
+            # Apply crop to all slices
+            if self.image_data.ndim == 3:
+                self.image_data = self.image_data[:, start_row:end_row, :]
+            else:  # 4D with color channels
+                self.image_data = self.image_data[:, start_row:end_row, :, :]
+
+            self.status_text.append(
+                f"Applied crop: top={self.crop_top}, bottom={self.crop_bottom}. "
+                f"Height: {H} → {new_height}"
+            )
+
+            # Reset crop sliders since crop has been applied
+            self.crop_top_slider.setValue(0)
+            self.crop_bottom_slider.setValue(0)
+
+            # Update UI constraints
+            self.crop_top_slider.setMaximum(new_height - 1)
+            self.crop_bottom_slider.setMaximum(new_height - 1)
+
+            # Reset corners and update display
+            self.reset_corners_to_default()
+            self.setup_corner_slider_ranges()
+            self.reset_zoom()
+            self.update_slice_display()
+
+            QMessageBox.information(
+                self,
+                "Crop Applied",
+                f"Crop applied successfully. New dimensions: {self.image_data.shape}",
+            )
+
+        except Exception as e:
+            self.status_text.append(f"Error applying crop: {str(e)}")
+            QMessageBox.critical(
+                self, "Error", f"Failed to apply crop: {str(e)}"
+            )
+
+    def is_crop_active(self):
+        """Check if any crop is active"""
+        return self.crop_top > 0 or self.crop_bottom > 0
+
+    def apply_crop_to_slice(self, slice_data):
+        """Apply crop to a single slice (for preview)"""
+        if not self.is_crop_active():
+            return slice_data
+
+        H = slice_data.shape[0]
+        total_crop = self.crop_top + self.crop_bottom
+
+        # Validate crop doesn't exceed slice height
+        if total_crop >= H:
+            return slice_data  # Return original if crop is invalid
+
+        start_row = self.crop_top
+        end_row = H - self.crop_bottom
+
+        if len(slice_data.shape) == 2:
+            return slice_data[start_row:end_row, :]
+        else:  # 3D slice with color channels
+            return slice_data[start_row:end_row, :, :]
 
     def on_corner_notes_toggled(self, checked):
         self.show_corner_notes = checked
@@ -964,7 +1193,10 @@ class RawImageGuessQt(QMainWindow):
             self.corner_positions[self.selected_corner_index] = [x, y, z]
 
             # Apply symmetry if enabled and we're editing a master corner
-            if self.use_corner_symmetry and self.selected_corner_index in self.master_corners:
+            if (
+                self.use_corner_symmetry
+                and self.selected_corner_index in self.master_corners
+            ):
                 self.apply_corner_symmetry()
                 # No need to sync sliders again since we're editing the current corner
 
@@ -1130,14 +1362,38 @@ class RawImageGuessQt(QMainWindow):
 
         # Apply symmetry transformations:
         # Mirror C000 and C010 across center in X direction to get C100 and C110
-        self.corner_positions[1] = [2*center_x - c000[0], c000[1], c000[2]]  # C100
-        self.corner_positions[3] = [2*center_x - c010[0], c010[1], c010[2]]  # C110
+        self.corner_positions[1] = [
+            2 * center_x - c000[0],
+            c000[1],
+            c000[2],
+        ]  # C100
+        self.corner_positions[3] = [
+            2 * center_x - c010[0],
+            c010[1],
+            c010[2],
+        ]  # C110
 
         # Mirror all Z- plane corners across center in Z direction to get Z+ plane
-        self.corner_positions[4] = [c000[0], c000[1], 2*center_z - c000[2]]  # C001
-        self.corner_positions[5] = [self.corner_positions[1][0], self.corner_positions[1][1], 2*center_z - self.corner_positions[1][2]]  # C101
-        self.corner_positions[6] = [c010[0], c010[1], 2*center_z - c010[2]]  # C011
-        self.corner_positions[7] = [self.corner_positions[3][0], self.corner_positions[3][1], 2*center_z - self.corner_positions[3][2]]  # C111
+        self.corner_positions[4] = [
+            c000[0],
+            c000[1],
+            2 * center_z - c000[2],
+        ]  # C001
+        self.corner_positions[5] = [
+            self.corner_positions[1][0],
+            self.corner_positions[1][1],
+            2 * center_z - self.corner_positions[1][2],
+        ]  # C101
+        self.corner_positions[6] = [
+            c010[0],
+            c010[1],
+            2 * center_z - c010[2],
+        ]  # C011
+        self.corner_positions[7] = [
+            self.corner_positions[3][0],
+            self.corner_positions[3][1],
+            2 * center_z - self.corner_positions[3][2],
+        ]  # C111
 
     def get_pixel_info(self):
         pixel_type = self.pixel_type_combo.currentText()
@@ -1287,6 +1543,11 @@ class RawImageGuessQt(QMainWindow):
             self.reset_corners_to_default()
             self.setup_corner_slider_ranges()
 
+            # Update crop slider limits based on new image height
+            height = self.image_data.shape[1]
+            self.crop_top_slider.setMaximum(height - 1)
+            self.crop_bottom_slider.setMaximum(height - 1)
+
             # Apply symmetry if enabled
             if self.use_corner_symmetry:
                 self.apply_corner_symmetry()
@@ -1326,6 +1587,9 @@ class RawImageGuessQt(QMainWindow):
         else:
             slice_data = self.image_data[self.current_slice].copy()
 
+        # Apply crop preview (realtime)
+        slice_data = self.apply_crop_to_slice(slice_data)
+
         # Apply enhancement for grayscale
         if len(slice_data.shape) == 2:
             slice_data = self.apply_image_enhancement(slice_data)
@@ -1333,11 +1597,23 @@ class RawImageGuessQt(QMainWindow):
         # Display
         self.ax.clear()
         if len(slice_data.shape) == 3:
-            self.ax.imshow(slice_data)
+            im = self.ax.imshow(slice_data)
         else:
-            self.ax.imshow(
+            im = self.ax.imshow(
                 slice_data, cmap="gray", vmin=self.vmin, vmax=self.vmax
             )
+
+        # Display overlay if enabled and available
+        # Note: Overlay is viewer-only and uses original image dimensions, unaffected by transformations
+        if (
+            self.overlay_enabled
+            and self.overlay_data is not None
+            and hasattr(self, "overlay_data")
+            and self.overlay_data is not None
+        ):
+            # Use original image dimensions, not transformed slice dimensions
+            original_shape = self.image_data[self.current_slice].shape[:2]
+            self.display_overlay(original_shape)
 
         # Aspect from spacing
         try:
@@ -1350,8 +1626,15 @@ class RawImageGuessQt(QMainWindow):
             pass
 
         z_pos = self.current_slice * float(self.spacing_z_spin.value())
-        symmetry_text = " (Symmetry: C000+C010→All)" if self.use_corner_symmetry else ""
-        title = f"Slice {self.current_slice} (z={z_pos:.3f}) - Realtime 3D Corner Warp{symmetry_text}"
+        symmetry_text = (
+            " (Symmetry: C000+C010→All)" if self.use_corner_symmetry else ""
+        )
+        crop_text = (
+            f" | Crop: T{self.crop_top}/B{self.crop_bottom}"
+            if self.is_crop_active()
+            else ""
+        )
+        title = f"Slice {self.current_slice} (z={z_pos:.3f}) - Realtime 3D Corner Warp{symmetry_text}{crop_text}"
         self.ax.set_title(title)
         self.ax.axis("off")
 
@@ -1517,7 +1800,16 @@ class RawImageGuessQt(QMainWindow):
                 sx, sy, ha, va = W - 4, H - 4, "right", "bottom"
             else:
                 sx, sy, ha, va = 4, H - 4, "left", "bottom"
-            corner_names = ['C000','C100','C010','C110','C001','C101','C011','C111']
+            corner_names = [
+                "C000",
+                "C100",
+                "C010",
+                "C110",
+                "C001",
+                "C101",
+                "C011",
+                "C111",
+            ]
             selected_text = f"<< Selected {corner_names[sel]} >>"
             if self.use_corner_symmetry:
                 if sel in self.master_corners:
@@ -1717,7 +2009,9 @@ class RawImageGuessQt(QMainWindow):
         sb.setValue(va)
         sa.blockSignals(False)
         sb.blockSignals(False)
-        self.debug_log(f"Spacing after swap: {a}={sa.value()} {b}={sb.value()}")
+        self.debug_log(
+            f"Spacing after swap: {a}={sa.value()} {b}={sb.value()}"
+        )
 
     def apply_saved_orientation(self):
         """Reapply recorded flips/rotations to current volume after reload."""
@@ -1726,7 +2020,11 @@ class RawImageGuessQt(QMainWindow):
 
         # Decide whether to swap spacings on reapply
         reason = self._last_load_reason or ""
-        skip_spacing_swaps = reason.startswith("auto_update from spacing_") or reason.startswith("auto_update from spacing") or reason.startswith("auto_update from spacing-")
+        skip_spacing_swaps = (
+            reason.startswith("auto_update from spacing_")
+            or reason.startswith("auto_update from spacing")
+            or reason.startswith("auto_update from spacing-")
+        )
 
         for op in self.orientation_ops:
             if not op:
@@ -1760,12 +2058,16 @@ class RawImageGuessQt(QMainWindow):
                         self._swap_spacing("x", "z")
                 else:
                     continue
-                self.debug_log(f"Reapply op: rotate {axis} dir={int(direction)}")
+                self.debug_log(
+                    f"Reapply op: rotate {axis} dir={int(direction)}"
+                )
                 self.image_data = np.rot90(self.image_data, k=k, axes=axes)
 
         # Update slice controls after applying all ops
         self.slice_slider.setMaximum(self.image_data.shape[0] - 1)
-        self.current_slice = min(self.current_slice, self.image_data.shape[0] - 1)
+        self.current_slice = min(
+            self.current_slice, self.image_data.shape[0] - 1
+        )
         self.slice_slider.setValue(self.current_slice)
 
     def offset_header(self, operation, mode):
@@ -2032,17 +2334,32 @@ class RawImageGuessQt(QMainWindow):
             )
 
     def build_warped_volume_for_export(self):
-        # If corners are exactly identity, skip the resample for speed
+        # If corners are exactly identity and no crop, skip the resample for speed
         if self.corner_positions is None or self.image_data is None:
+            # Still need to apply crop if active
+            if self.is_crop_active():
+                data_copy = self.image_data.copy()
+                H = data_copy.shape[1]
+                total_crop = self.crop_top + self.crop_bottom
+                if total_crop < H:
+                    start_row = self.crop_top
+                    end_row = H - self.crop_bottom
+                    if data_copy.ndim == 3:
+                        return data_copy[:, start_row:end_row, :]
+                    else:
+                        return data_copy[:, start_row:end_row, :, :]
             return self.image_data
 
-        if self.are_corners_identity():
+        if self.are_corners_identity() and not self.is_crop_active():
             return self.image_data
 
         D = self.image_data.shape[0]
         warped_slices = []
         for z in range(D):
-            warped_slices.append(self.warp_slice_with_corners(z))
+            slice_warped = self.warp_slice_with_corners(z)
+            # Apply crop to warped slice
+            slice_warped = self.apply_crop_to_slice(slice_warped)
+            warped_slices.append(slice_warped)
         return np.stack(warped_slices, axis=0)
 
     def are_corners_identity(self):
@@ -2154,13 +2471,17 @@ class RawImageGuessQt(QMainWindow):
             if abs(self.curve_x_pos) > 1e-6:
                 mask_pos = x_norm >= 0.5
                 intensity = (x_norm - 0.5) * 2.0  # 0 to 1 from center to edge
-                curve_factor_x[mask_pos] += self.curve_x_pos * intensity[mask_pos]
+                curve_factor_x[mask_pos] += (
+                    self.curve_x_pos * intensity[mask_pos]
+                )
 
             # Negative X curve affects the negative X half
             if abs(self.curve_x_neg) > 1e-6:
                 mask_neg = x_norm <= 0.5
                 intensity = (0.5 - x_norm) * 2.0  # 0 to 1 from center to edge
-                curve_factor_x[mask_neg] += self.curve_x_neg * intensity[mask_neg]
+                curve_factor_x[mask_neg] += (
+                    self.curve_x_neg * intensity[mask_neg]
+                )
 
             # Apply curve by offsetting Y and Z coordinates
             Y += curve_factor_x * (H - 1) * 0.5 * np.sin(np.pi * y_norm)
@@ -2173,12 +2494,16 @@ class RawImageGuessQt(QMainWindow):
             if abs(self.curve_y_pos) > 1e-6:
                 mask_pos = y_norm >= 0.5
                 intensity = (y_norm - 0.5) * 2.0
-                curve_factor_y[mask_pos] += self.curve_y_pos * intensity[mask_pos]
+                curve_factor_y[mask_pos] += (
+                    self.curve_y_pos * intensity[mask_pos]
+                )
 
             if abs(self.curve_y_neg) > 1e-6:
                 mask_neg = y_norm <= 0.5
                 intensity = (0.5 - y_norm) * 2.0
-                curve_factor_y[mask_neg] += self.curve_y_neg * intensity[mask_neg]
+                curve_factor_y[mask_neg] += (
+                    self.curve_y_neg * intensity[mask_neg]
+                )
 
             X += curve_factor_y * (W - 1) * 0.5 * np.sin(np.pi * x_norm)
             Z += curve_factor_y * (D - 1) * 0.5 * np.sin(np.pi * z_norm)
@@ -2190,12 +2515,16 @@ class RawImageGuessQt(QMainWindow):
             if abs(self.curve_z_pos) > 1e-6:
                 mask_pos = z_norm >= 0.5
                 intensity = (z_norm - 0.5) * 2.0
-                curve_factor_z[mask_pos] += self.curve_z_pos * intensity[mask_pos]
+                curve_factor_z[mask_pos] += (
+                    self.curve_z_pos * intensity[mask_pos]
+                )
 
             if abs(self.curve_z_neg) > 1e-6:
                 mask_neg = z_norm <= 0.5
                 intensity = (0.5 - z_norm) * 2.0
-                curve_factor_z[mask_neg] += self.curve_z_neg * intensity[mask_neg]
+                curve_factor_z[mask_neg] += (
+                    self.curve_z_neg * intensity[mask_neg]
+                )
 
             X += curve_factor_z * (W - 1) * 0.5 * np.sin(np.pi * x_norm)
             Y += curve_factor_z * (H - 1) * 0.5 * np.sin(np.pi * y_norm)
@@ -2313,8 +2642,7 @@ class RawImageGuessQt(QMainWindow):
         """Get current configuration as a dictionary"""
         config = {
             # File parameters
-            "current_file": getattr(self, 'current_file', DEFAULT_IMAGE_FILE),
-
+            "current_file": getattr(self, "current_file", DEFAULT_IMAGE_FILE),
             # Image parameters
             "pixel_type": self.pixel_type_combo.currentText(),
             "endianness": self.endianness_combo.currentText(),
@@ -2327,25 +2655,21 @@ class RawImageGuessQt(QMainWindow):
             "depth": self.depth_slider.value(),
             "skip_slices": self.skip_slices_slider.value(),
             "slice_stride": self.slice_stride_slider.value(),
-
             # Spacing parameters
             "spacing_x": self.spacing_x_spin.value(),
             "spacing_y": self.spacing_y_spin.value(),
             "spacing_z": self.spacing_z_spin.value(),
-
             # Enhancement parameters
             "brightness": self.brightness_slider.value(),
             "contrast": self.contrast_slider.value(),
             "gamma": self.gamma_slider.value(),
             "window_min": self.window_min_slider.value(),
             "window_max": self.window_max_slider.value(),
-
             # Scale parameters
             "scale_x": self.scale_x_spin.value(),
             "scale_y": self.scale_y_spin.value(),
             "scale_z": self.scale_z_spin.value(),
             "preserve_size": self.preserve_size_checkbox.isChecked(),
-
             # Curve parameters
             "curve_x_pos": self.curve_x_pos_slider.value(),
             "curve_x_neg": self.curve_x_neg_slider.value(),
@@ -2353,16 +2677,28 @@ class RawImageGuessQt(QMainWindow):
             "curve_y_neg": self.curve_y_neg_slider.value(),
             "curve_z_pos": self.curve_z_pos_slider.value(),
             "curve_z_neg": self.curve_z_neg_slider.value(),
-
+            # Crop parameters
+            "crop_top": self.crop_top_slider.value(),
+            "crop_bottom": self.crop_bottom_slider.value(),
             # Corner parameters
             "use_corner_symmetry": self.use_corner_symmetry,
             "show_corner_notes": self.show_corner_notes,
-            "corner_positions": self.corner_positions.tolist() if self.corner_positions is not None else None,
+            "corner_positions": (
+                self.corner_positions.tolist()
+                if self.corner_positions is not None
+                else None
+            ),
             "selected_corner_index": self.selected_corner_index,
-
             # UI parameters
             "auto_update": self.auto_update_checkbox.isChecked(),
-
+            # Overlay parameters
+            "overlay_file_path": getattr(self, "overlay_file_path", ""),
+            "overlay_enabled": getattr(self, "overlay_enabled", False),
+            "overlay_alpha": (
+                int(self.overlay_alpha_slider.value())
+                if hasattr(self, "overlay_alpha_slider")
+                else 50
+            ),
             # Orientation history
             "orientation_ops": self.orientation_ops,
         }
@@ -2377,22 +2713,42 @@ class RawImageGuessQt(QMainWindow):
             self.debug_log("apply_config start")
             # Block signals during bulk updates
             widgets = [
-                self.pixel_type_combo, self.endianness_combo,
-                self.header_size_slider, self.footer_size_slider,
-                self.width_slider, self.height_slider,
-                self.row_stride_slider, self.row_padding_slider,
-                self.depth_slider, self.skip_slices_slider,
-                self.slice_stride_slider, self.spacing_x_spin,
-                self.spacing_y_spin, self.spacing_z_spin,
-                self.brightness_slider, self.contrast_slider,
-                self.gamma_slider, self.window_min_slider,
-                self.window_max_slider, self.scale_x_spin,
-                self.scale_y_spin, self.scale_z_spin,
-                self.preserve_size_checkbox, self.curve_x_pos_slider,
-                self.curve_x_neg_slider, self.curve_y_pos_slider,
-                self.curve_y_neg_slider, self.curve_z_pos_slider,
-                self.curve_z_neg_slider, self.corner_notes_checkbox,
-                self.corner_symmetry_checkbox, self.auto_update_checkbox
+                self.pixel_type_combo,
+                self.endianness_combo,
+                self.header_size_slider,
+                self.footer_size_slider,
+                self.width_slider,
+                self.height_slider,
+                self.row_stride_slider,
+                self.row_padding_slider,
+                self.depth_slider,
+                self.skip_slices_slider,
+                self.slice_stride_slider,
+                self.spacing_x_spin,
+                self.spacing_y_spin,
+                self.spacing_z_spin,
+                self.brightness_slider,
+                self.contrast_slider,
+                self.gamma_slider,
+                self.window_min_slider,
+                self.window_max_slider,
+                self.scale_x_spin,
+                self.scale_y_spin,
+                self.scale_z_spin,
+                self.preserve_size_checkbox,
+                self.curve_x_pos_slider,
+                self.curve_x_neg_slider,
+                self.curve_y_pos_slider,
+                self.curve_y_neg_slider,
+                self.curve_z_pos_slider,
+                self.curve_z_neg_slider,
+                self.crop_top_slider,
+                self.crop_bottom_slider,
+                self.corner_notes_checkbox,
+                self.corner_symmetry_checkbox,
+                self.auto_update_checkbox,
+                self.overlay_enabled_checkbox,
+                self.overlay_alpha_slider,
             ]
 
             for widget in widgets:
@@ -2401,7 +2757,9 @@ class RawImageGuessQt(QMainWindow):
             # File parameters
             if "current_file" in config:
                 self.current_file = config["current_file"]
-                self.file_path_label.setText(f"File: {os.path.basename(self.current_file)}")
+                self.file_path_label.setText(
+                    f"File: {os.path.basename(self.current_file)}"
+                )
 
             # Image parameters
             if "pixel_type" in config:
@@ -2436,6 +2794,8 @@ class RawImageGuessQt(QMainWindow):
                 ("curve_y_neg", self.curve_y_neg_slider),
                 ("curve_z_pos", self.curve_z_pos_slider),
                 ("curve_z_neg", self.curve_z_neg_slider),
+                ("crop_top", self.crop_top_slider),
+                ("crop_bottom", self.crop_bottom_slider),
             ]
 
             for key, slider in slider_configs:
@@ -2462,22 +2822,44 @@ class RawImageGuessQt(QMainWindow):
                 ("show_corner_notes", self.corner_notes_checkbox),
                 ("use_corner_symmetry", self.corner_symmetry_checkbox),
                 ("auto_update", self.auto_update_checkbox),
+                ("overlay_enabled", self.overlay_enabled_checkbox),
             ]
 
             for key, checkbox in checkbox_configs:
                 if key in config:
                     checkbox.setChecked(bool(config[key]))
 
+            # Overlay parameters
+            if "overlay_file_path" in config and config["overlay_file_path"]:
+                if os.path.exists(config["overlay_file_path"]):
+                    self.load_overlay_file(config["overlay_file_path"])
+                else:
+                    self.status_text.append(
+                        f"Overlay file not found: {config['overlay_file_path']}"
+                    )
+
+            if "overlay_alpha" in config:
+                self.overlay_alpha_slider.setValue(
+                    int(config["overlay_alpha"])
+                )
+
             # Corner parameters
-            if "corner_positions" in config and config["corner_positions"] is not None:
+            if (
+                "corner_positions" in config
+                and config["corner_positions"] is not None
+            ):
                 self.corner_positions = np.array(config["corner_positions"])
 
             if "selected_corner_index" in config:
-                self.selected_corner_index = int(config["selected_corner_index"])
+                self.selected_corner_index = int(
+                    config["selected_corner_index"]
+                )
 
             # Orientation history
             if "orientation_ops" in config:
-                self.orientation_ops = list(config["orientation_ops"])  # ensure list type
+                self.orientation_ops = list(
+                    config["orientation_ops"]
+                )  # ensure list type
 
             # Restore signals
             for widget in widgets:
@@ -2487,6 +2869,7 @@ class RawImageGuessQt(QMainWindow):
             self.update_slider_labels()
             self.update_enhancement_labels()
             self.update_curve_labels()
+            self.update_crop_labels()
             self.update_corner_combo_items()
             if self.corner_positions is not None:
                 self.setup_corner_slider_ranges()
@@ -2500,31 +2883,43 @@ class RawImageGuessQt(QMainWindow):
 
         except Exception as e:
             self.status_text.append(f"Error applying configuration: {str(e)}")
-            QMessageBox.critical(self, "Error", f"Failed to apply configuration: {str(e)}")
+            QMessageBox.critical(
+                self, "Error", f"Failed to apply configuration: {str(e)}"
+            )
 
     def save_config(self):
         """Save current configuration to a JSON file"""
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "Save Configuration", "", "JSON Files (*.json);;All Files (*)"
+            self,
+            "Save Configuration",
+            "",
+            "JSON Files (*.json);;All Files (*)",
         )
         if not file_path:
             return
 
         try:
             config = self.get_current_config()
-            with open(file_path, 'w') as f:
+            with open(file_path, "w") as f:
                 json.dump(config, f, indent=4)
             self.status_text.append(f"Configuration saved to: {file_path}")
-            QMessageBox.information(self, "Success", f"Configuration saved to: {file_path}")
+            QMessageBox.information(
+                self, "Success", f"Configuration saved to: {file_path}"
+            )
 
         except Exception as e:
             self.status_text.append(f"Error saving configuration: {str(e)}")
-            QMessageBox.critical(self, "Error", f"Failed to save configuration: {str(e)}")
+            QMessageBox.critical(
+                self, "Error", f"Failed to save configuration: {str(e)}"
+            )
 
     def load_config_dialog(self):
         """Load configuration from a JSON file via dialog"""
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Load Configuration", "", "JSON Files (*.json);;All Files (*)"
+            self,
+            "Load Configuration",
+            "",
+            "JSON Files (*.json);;All Files (*)",
         )
         if not file_path:
             return
@@ -2534,22 +2929,203 @@ class RawImageGuessQt(QMainWindow):
     def load_config(self, file_path):
         """Load configuration from a JSON file"""
         try:
-            with open(file_path, 'r') as f:
+            with open(file_path, "r") as f:
                 config = json.load(f)
             self.apply_config(config)
             self.status_text.append(f"Configuration loaded from: {file_path}")
 
         except Exception as e:
             self.status_text.append(f"Error loading configuration: {str(e)}")
-            QMessageBox.critical(self, "Error", f"Failed to load configuration: {str(e)}")
+            QMessageBox.critical(
+                self, "Error", f"Failed to load configuration: {str(e)}"
+            )
 
     def main(self):
         pass
 
+    def browse_overlay_file(self):
+        """Browse and load an overlay image file"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Overlay Image File",
+            "",
+            "Image Files (*.png *.jpg *.jpeg *.bmp *.tiff *.tif);;Raw Files (*.raw);;All Files (*)",
+        )
+        if file_path:
+            self.load_overlay_file(file_path)
+
+    def load_overlay_file(self, file_path):
+        """Load an overlay image from file"""
+        try:
+            # Check file extension to determine how to load
+            file_ext = os.path.splitext(file_path)[1].lower()
+
+            if file_ext in [".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"]:
+                # Load standard image formats using matplotlib
+                import matplotlib.image as mpimg
+
+                overlay_img = mpimg.imread(file_path)
+
+                # Convert to grayscale if RGB
+                if len(overlay_img.shape) == 3:
+                    # Convert RGB to grayscale
+                    if overlay_img.shape[2] == 3:
+                        overlay_img = np.dot(
+                            overlay_img[..., :3], [0.2989, 0.5870, 0.1140]
+                        )
+                    elif overlay_img.shape[2] == 4:
+                        # Handle RGBA
+                        overlay_img = np.dot(
+                            overlay_img[..., :3], [0.2989, 0.5870, 0.1140]
+                        )
+
+                # Normalize to 0-255 range if needed
+                if (
+                    overlay_img.dtype == np.float32
+                    or overlay_img.dtype == np.float64
+                ):
+                    if overlay_img.max() <= 1.0:
+                        overlay_img = (overlay_img * 255).astype(np.uint8)
+                    else:
+                        overlay_img = overlay_img.astype(np.uint8)
+
+                self.overlay_data = overlay_img
+                self.overlay_file_path = file_path
+                self.overlay_file_label.setText(
+                    f"Overlay: {os.path.basename(file_path)}"
+                )
+                self.status_text.append(f"Loaded overlay image: {file_path}")
+
+            elif file_ext == ".raw":
+                # For raw files, use similar parameters to main image (simplified)
+                QMessageBox.information(
+                    self,
+                    "Raw Overlay",
+                    "Raw overlay files are not yet supported. Please use standard image formats (PNG, JPG, etc.)",
+                )
+                return
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Unsupported Format",
+                    f"File format {file_ext} is not supported for overlay images.",
+                )
+                return
+
+            # If overlay is enabled, update display
+            if self.overlay_enabled and self.image_data is not None:
+                self.update_slice_display()
+
+        except Exception as e:
+            self.status_text.append(f"Error loading overlay file: {str(e)}")
+            QMessageBox.critical(
+                self, "Error", f"Failed to load overlay file: {str(e)}"
+            )
+
+    def clear_overlay(self):
+        """Clear the overlay image"""
+        self.overlay_data = None
+        self.overlay_file_path = ""
+        self.overlay_file_label.setText("No overlay selected")
+        self.overlay_enabled_checkbox.setChecked(False)
+        self.overlay_enabled = False
+        self.status_text.append("Overlay cleared")
+
+        # Update display if we have image data
+        if self.image_data is not None:
+            self.update_slice_display()
+
+    def on_overlay_toggled(self, checked):
+        """Handle overlay enable/disable toggle"""
+        self.overlay_enabled = checked
+        if self.image_data is not None:
+            self.update_slice_display()
+
+    def on_overlay_alpha_changed(self):
+        """Handle overlay transparency slider changes"""
+        alpha_percent = self.overlay_alpha_slider.value()
+        self.overlay_alpha = alpha_percent / 100.0
+        self.overlay_alpha_label.setText(f"{alpha_percent}%")
+
+        # Update display if overlay is enabled and we have data
+        if (
+            self.overlay_enabled
+            and self.overlay_data is not None
+            and self.image_data is not None
+        ):
+            self.update_slice_display()
+
+    def display_overlay(self, target_shape):
+        """Display overlay image with proper scaling and transparency.
+
+        The overlay is purely for visual reference and is not affected by any transformations
+        or included in exports. It always scales to match the original (untransformed) image dimensions.
+        """
+        try:
+            overlay = self.overlay_data.copy()
+            target_height, target_width = target_shape
+
+            # Resize overlay to match current slice dimensions
+            if overlay.shape != target_shape:
+                # Use scipy for better interpolation if available
+                try:
+                    from scipy import ndimage
+
+                    # Calculate zoom factors
+                    zoom_y = target_height / overlay.shape[0]
+                    zoom_x = target_width / overlay.shape[1]
+                    overlay = ndimage.zoom(
+                        overlay, (zoom_y, zoom_x), order=1, mode="nearest"
+                    )
+                except ImportError:
+                    # Fallback to simple nearest neighbor interpolation
+                    import matplotlib.image as mpimg
+                    from matplotlib import pyplot as plt
+
+                    # Create a figure for resizing (temporary)
+                    fig_temp = plt.figure(figsize=(1, 1))
+                    ax_temp = fig_temp.add_subplot(111)
+                    ax_temp.imshow(
+                        overlay, extent=[0, target_width, target_height, 0]
+                    )
+                    ax_temp.set_xlim(0, target_width)
+                    ax_temp.set_ylim(target_height, 0)
+                    plt.close(fig_temp)
+
+                    # Simple resize using numpy indexing
+                    y_indices = np.linspace(
+                        0, overlay.shape[0] - 1, target_height
+                    ).astype(int)
+                    x_indices = np.linspace(
+                        0, overlay.shape[1] - 1, target_width
+                    ).astype(int)
+                    overlay = overlay[np.ix_(y_indices, x_indices)]
+
+            # Ensure overlay is 2D
+            if len(overlay.shape) > 2:
+                overlay = (
+                    overlay[:, :, 0]
+                    if overlay.shape[2] > 1
+                    else overlay.squeeze()
+                )
+
+            # Display overlay with transparency
+            self.ax.imshow(
+                overlay,
+                cmap="hot",  # Use a distinctive colormap for overlay
+                alpha=self.overlay_alpha,
+                interpolation="nearest",
+            )
+
+        except Exception as e:
+            self.status_text.append(f"Error displaying overlay: {str(e)}")
+
 
 def main():
-    parser = argparse.ArgumentParser(description='3D Ultrasound Scrapper')
-    parser.add_argument('--config', '-c', type=str, help='Path to configuration JSON file')
+    parser = argparse.ArgumentParser(description="3D Ultrasound Scrapper")
+    parser.add_argument(
+        "--config", "-c", type=str, help="Path to configuration JSON file"
+    )
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
