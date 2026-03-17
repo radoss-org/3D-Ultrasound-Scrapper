@@ -17,6 +17,8 @@ When working with legacy or proprietary ultrasound exports (and other modalities
 - Fast, interactive parameter discovery with immediate visual feedback
 - Realtime geometric correction via 8-corner warp and curve-based bending
 - Windowing, brightness/contrast, and gamma for quick visibility improvements
+- Cropping (top/bottom/left/right) during export/preview
+- Header/footer handling, including header-end marker + optional header offset
 - NRRD header generation and full volume export
 - Saved configurations you can reapply to similar datasets
 - A batch GUI to run an entire folder using a configuration template
@@ -45,9 +47,11 @@ We aim to have a much more comprehensive list of features compared to [RawImageG
 - Realtime 3D 8-corner warp with symmetry option and on-image corner overlays
 - Realtime curve deformations along X/Y/Z halves for bending corrections
 - Enhancement controls: brightness, contrast, gamma, and coarse windowing
+- Cropping controls: T/B/L/R
+- Header end marker + optional header offset for finding/skipping variable raw headers
 - NRRD header generator (NHDR+RAW) and direct NRRD writer (with binary payload)
 - Configuration save/load (JSON) including UI state, corner warp, curves, spacing
-- Batch Processor GUI to process entire folders to NRRD using a saved config
+- Batch Processor GUI to process entire folders using a saved config (NRRD or MP4 output)
 
 ---
 
@@ -129,10 +133,10 @@ python scripts/test.py
 **Then:**
 - Load a RAW-like file (Browse File → Load Image), then adjust:
   - Pixel type, endianness
-  - Header/footer, row stride/padding, slice padding
-  - Width/height/depth (and skip-slices if needed)
+  - Header/footer bytes, row stride/padding, slice stride + skip-slices
+  - Width/height/depth
   - Spacing X/Y/Z
-  - Optional: flips/rotations, corner warp, curve bending, enhancements
+  - Optional: flips/rotations, corner warp, curve bending, cropping, enhancements
 
 - When the volume looks correct, export:
   - Generate just a header: "Generate NRRD Header" (NHDR sidecar)
@@ -174,7 +178,7 @@ Configuration captures:
 
 ## Batch Processing
 
-Use the Batch Processor GUI to apply a saved configuration to many files and export NRRDs:
+Use the Batch Processor GUI to apply a saved configuration to many files and export NRRDs (or MP4 videos):
 
 ### Using Executables:
 ```bash
@@ -188,13 +192,14 @@ python scripts/batch_processor.py
 
 **Steps:**
 1. Input Settings: select an input folder, file pattern (e.g., `*.raw`), and your saved JSON config
-2. Output Settings: choose an output folder; optionally preserve original filenames
-3. Click "Start Processing," watch the progress bar and log
+2. Output Settings: choose an output folder (unless using "Save next to original file"), output format (NRRD or MP4), and options like "Preserve original filenames"
+3. (Optional) File size filters: set min/max file size to limit which files are processed
+4. Click "Start Processing," watch the progress bar and log
 
 The batch runner:
 - Loads each file with your config
-- Applies orientation, optional warp/curves, optional stretch
-- Writes NRRD with spacings preserved (or adjusted if stretched)
+- Applies orientation + optional warp/curves + optional cropping
+- Writes NRRD or MP4 (depending on output selection)
 - Continues past per-file errors
 
 ---
@@ -207,6 +212,16 @@ The batch runner:
 - **Format identification reference**: [`https://www.tomovision.com/products/format_image.html`](https://www.tomovision.com/products/format_image.html)
 
 This tool does not decode every proprietary format automatically. Instead, it provides powerful interactive tools to rapidly test hypotheses and fine-tune parameters once you have initial estimates, then export clean NRRD files.
+
+## Example (red sphere RAW)
+
+This repo includes a tiny generated RGB volume example at [example/red_sphere_300x300x300.raw](example/red_sphere_300x300x300.raw). You can use it to sanity-check your pipeline.
+
+- Pixel type: `24 bit RGB`
+- Dimensions: `300 x 300 x 300`
+- Header/footer: `0 / 0`
+
+You can generate an appropriate config by editing the settings in the app, or by loading one of the provided JSON configs (see `configs/red_sphere_test.json`) and exporting to NRRD.
 
 ---
 
@@ -221,8 +236,11 @@ project/
 │   ├── test.py                             # Main application source
 │   ├── batch_processor.py                  # Batch processor source
 │   └── build_exe.py                        # Build script for executables
+├── example/                       # Generated example volumes
+│   ├── make_example.py
+│   └── red_sphere_300x300x300.raw
 ├── configs/                       # Configuration files
-├── data/                         # Sample data (if any)
+├── data/                          # (Optional) Additional sample data
 └── README.md                     # This documentation
 ```
 
