@@ -3,4 +3,4 @@ data/
 out/
 scripts/build
 scripts/dist
-*.spec
+*.specdist/
