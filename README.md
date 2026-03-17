@@ -2,7 +2,7 @@
 
 An interactive tool to inspect, tune, and export 3D ultrasound (and other RAW-like medical) volumes, plus a batch processor for large datasets. Use it to quickly discover working parameters (dimensions, strides, endianness, spacing, windowing) and export to NRRD for downstream processing.
 
-![](https://files.mcaq.me/8820r.png)
+![](https://files.mcaq.me/79hra.gif)
 
 **Based on [RawImageGuess](https://github.com/acetylsalicyl/SlicerRawImageGuess) by acetylsalicyl**
 

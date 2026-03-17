@@ -1,0 +1,81 @@
+{
+    "current_file": "C:/Users/adamm/projects/3D Ultrasound Scrapper/red_sphere_300x300x300.raw",
+    "pixel_type": "24 bit RGB",
+    "endianness": "Little endian",
+    "header_size": 0,
+    "footer_size": 0,
+    "width": 300,
+    "height": 300,
+    "row_stride": 0,
+    "row_padding": 0,
+    "depth": 300,
+    "skip_slices": 0,
+    "slice_stride": 0,
+    "spacing_x": 1.0,
+    "spacing_y": 0.9999999999999988,
+    "spacing_z": 1.0,
+    "brightness": 0,
+    "contrast": 100,
+    "gamma": 100,
+    "window_min": 0,
+    "window_max": 100,
+    "curve_x_pos": 0,
+    "curve_x_neg": 0,
+    "curve_y_pos": 0,
+    "curve_y_neg": 0,
+    "curve_z_pos": 0,
+    "curve_z_neg": 0,
+    "crop_top": 0,
+    "crop_bottom": 0,
+    "crop_left": 0,
+    "crop_right": 0,
+    "use_corner_symmetry": true,
+    "show_corner_notes": true,
+    "corner_positions": [
+        [
+            0.0,
+            0.0,
+            0.0
+        ],
+        [
+            299.0,
+            0.0,
+            0.0
+        ],
+        [
+            0.0,
+            299.0,
+            0.0
+        ],
+        [
+            299.0,
+            299.0,
+            0.0
+        ],
+        [
+            0.0,
+            0.0,
+            299.0
+        ],
+        [
+            299.0,
+            0.0,
+            299.0
+        ],
+        [
+            0.0,
+            299.0,
+            299.0
+        ],
+        [
+            299.0,
+            299.0,
+            299.0
+        ]
+    ],
+    "selected_corner_index": 0,
+    "orientation_ops": [],
+    "header_end_marker": "",
+    "use_header_offset": false,
+    "header_offset": 0
+}
