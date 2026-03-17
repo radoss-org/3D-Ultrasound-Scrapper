@@ -253,6 +253,13 @@ class BatchImageProcessor:
         self.slice_stride = config.get("slice_stride", 0)
         self.skip_slices = config.get("skip_slices", 0)
 
+        # Dynamic header marker/offset
+        self.header_end_marker = config.get(
+            "header_end_marker", "[SCALPEL]\ncount=0"
+        )
+        self.use_header_offset = bool(config.get("use_header_offset", False))
+        self.header_offset = int(config.get("header_offset", 0))
+
         # Spacing
         self.spacing_x = config.get("spacing_x", 1.0)
         self.spacing_y = config.get("spacing_y", 2.6)
@@ -289,6 +296,69 @@ class BatchImageProcessor:
 
     def set_input_file(self, file_path):
         self.current_file = file_path
+
+    def find_header_end(self, data: bytes) -> int:
+        if not self.header_end_marker or not data:
+            return 0
+
+        import re
+
+        marker_text = self.header_end_marker
+        marker_bytes = marker_text.encode("utf-8")
+
+        pos_exact = data.find(marker_bytes)
+        if pos_exact != -1:
+            end_pos = pos_exact + len(marker_bytes)
+            while end_pos < len(data) and data[end_pos : end_pos + 1] in (
+                b"\n",
+                b"\r",
+            ):
+                end_pos += 1
+            return end_pos
+
+        marker_lines = [
+            line for line in marker_text.splitlines() if line.strip()
+        ]
+        if not marker_lines:
+            return 0
+
+        alt_candidates = []
+        if len(marker_lines) >= 2:
+            alt_candidates = [
+                "\n".join(marker_lines).encode("utf-8"),
+                "\n\n".join(marker_lines).encode("utf-8"),
+                "\r\n".join(marker_lines).encode("utf-8"),
+                "\r\n\r\n".join(marker_lines).encode("utf-8"),
+            ]
+
+        for alt in alt_candidates:
+            alt_pos = data.find(alt)
+            if alt_pos != -1:
+                end_pos = alt_pos + len(alt)
+                while end_pos < len(data) and data[end_pos : end_pos + 1] in (
+                    b"\n",
+                    b"\r",
+                ):
+                    end_pos += 1
+                return end_pos
+
+        regex_pattern = rb""
+        for i, line in enumerate(marker_lines):
+            if i > 0:
+                regex_pattern += rb"\r?\n(?:\r?\n)*"
+            regex_pattern += re.escape(line.encode("utf-8"))
+
+        regex_match = re.search(regex_pattern, data, flags=re.DOTALL)
+        if regex_match is not None:
+            end_pos = regex_match.end()
+            while end_pos < len(data) and data[end_pos : end_pos + 1] in (
+                b"\n",
+                b"\r",
+            ):
+                end_pos += 1
+            return end_pos
+
+        return 0
 
     def get_pixel_info(self):
         """Get pixel type information"""
@@ -548,6 +618,26 @@ class BatchImageProcessor:
             return None
 
         try:
+            # Dynamic header detection (marker) + optional offset.
+            # Keep this as a per-file local variable so multiple files don't accumulate offsets.
+            header_size = self.header_size
+            if getattr(self, "header_end_marker", "").strip():
+                raw_bytes_for_search = b""
+                try:
+                    with open(self.current_file, "rb") as f:
+                        raw_bytes_for_search = f.read(512 * 1024)
+                except OSError:
+                    raw_bytes_for_search = b""
+
+                header_size_from_marker = self.find_header_end(
+                    raw_bytes_for_search
+                )
+                if header_size_from_marker > 0:
+                    header_size = header_size_from_marker
+
+            if getattr(self, "use_header_offset", False):
+                header_size += int(getattr(self, "header_offset", 0))
+
             dtype, byte_size, components = self.get_pixel_info()
 
             row_data_size = self.width * byte_size * components
@@ -560,7 +650,7 @@ class BatchImageProcessor:
             effective_slice_stride = slice_data_size + self.slice_stride
 
             total_header_size = (
-                self.header_size + self.skip_slices * effective_slice_stride
+                header_size + self.skip_slices * effective_slice_stride
             )
 
             file_size = os.path.getsize(self.current_file)

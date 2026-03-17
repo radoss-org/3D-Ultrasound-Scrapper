@@ -1,11 +1,12 @@
-# test.py
-
 import argparse
+import base64
 import json
 import os
 import sys
+from io import BytesIO
 
 import numpy as np
+import pydicom
 from matplotlib.backends.backend_qt5agg import (
     FigureCanvasQTAgg as FigureCanvas,
 )
@@ -26,6 +27,7 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSlider,
+    QSpinBox,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -35,6 +37,8 @@ DEFAULT_IMAGE_FILE = "sample_image.raw"
 
 
 class RawImageGuessQt(QMainWindow):
+    MIN_OB_TAG_SIZE = 100
+
     def __init__(self, config_file=None):
         super().__init__()
         self.image_data = None
@@ -74,9 +78,19 @@ class RawImageGuessQt(QMainWindow):
         self.crop_bottom = 0
         self.crop_left = 0
         self.crop_right = 0
+        self.dicom_ds = None
+        self.ob_tags = []
+        self.dicom_selected_tag = None
 
         # Orientation history
         self.orientation_ops = []
+
+        # Header marker
+        self.header_end_marker = "[SCALPEL]\ncount=0"
+
+        # Header offset
+        self.use_header_offset = False
+        self.header_offset = 0
 
         self.init_ui()
 
@@ -118,6 +132,18 @@ class RawImageGuessQt(QMainWindow):
         file_layout.addLayout(file_buttons)
         layout.addWidget(file_group)
 
+        # DICOM OB Tags
+        dicom_group = QGroupBox("DICOM OB Tags")
+        dicom_layout = QVBoxLayout(dicom_group)
+        self.dicom_tags_label = QLabel("No DICOM tags")
+        dicom_layout.addWidget(self.dicom_tags_label)
+        self.dicom_tag_combo = QComboBox()
+        self.dicom_tag_combo.currentIndexChanged.connect(
+            self.on_dicom_tag_changed
+        )
+        dicom_layout.addWidget(self.dicom_tag_combo)
+        layout.addWidget(dicom_group)
+
         # Image Parameters
         params_group = QGroupBox("Image Parameters")
         params_layout = QGridLayout(params_group)
@@ -151,30 +177,62 @@ class RawImageGuessQt(QMainWindow):
         self.header_size_slider = self.add_param_row(
             params_layout, 2, "Header Size:", 0, 1000000, 224999
         )
+
+        # Header offset controls
+        params_layout.addWidget(QLabel("Header Offset:"), 3, 0)
+        self.header_offset_checkbox = QCheckBox("Enable offset")
+        self.header_offset_checkbox.setChecked(False)
+        self.header_offset_checkbox.toggled.connect(
+            self.on_header_offset_toggled
+        )
+        params_layout.addWidget(self.header_offset_checkbox, 3, 1)
+
+        self.header_offset_spin = QSpinBox()
+        self.header_offset_spin.setRange(-1000000, 1000000)
+        self.header_offset_spin.setValue(0)
+        self.header_offset_spin.setSingleStep(1)
+        self.header_offset_spin.setEnabled(False)
+        self.header_offset_spin.valueChanged.connect(
+            self.on_header_offset_changed
+        )
+        params_layout.addWidget(self.header_offset_spin, 3, 2)
+
+        self.header_offset_label = QLabel("0")
+        params_layout.addWidget(self.header_offset_label, 3, 3)
+
         self.footer_size_slider = self.add_param_row(
-            params_layout, 3, "Footer Size:", 0, 1000000, 0
+            params_layout, 4, "Footer Size:", 0, 1000000, 0
         )
         self.width_slider = self.add_param_row(
-            params_layout, 4, "Width:", 1, 2000, 424
+            params_layout, 5, "Width:", 1, 2000, 424
         )
         self.height_slider = self.add_param_row(
-            params_layout, 5, "Height:", 1, 2000, 127
+            params_layout, 6, "Height:", 1, 2000, 127
         )
         self.row_stride_slider = self.add_param_row(
-            params_layout, 6, "Row Stride:", 0, 1000, 0
+            params_layout, 7, "Row Stride:", 0, 1000, 0
         )
         self.row_padding_slider = self.add_param_row(
-            params_layout, 7, "Row Padding:", 0, 1000, 0
+            params_layout, 8, "Row Padding:", 0, 1000, 0
         )
         self.depth_slider = self.add_param_row(
-            params_layout, 8, "Depth:", 1, 600, 317
+            params_layout, 9, "Depth:", 1, 600, 317
         )
         self.skip_slices_slider = self.add_param_row(
-            params_layout, 9, "Skip Slices:", 0, 100, 0
+            params_layout, 10, "Skip Slices:", 0, 100, 0
         )
         self.slice_stride_slider = self.add_param_row(
-            params_layout, 10, "Slice Padding:", 0, 1000, 432
+            params_layout, 11, "Slice Padding:", 0, 1000, 432
         )
+
+        params_layout.addWidget(QLabel("Header End Marker:"), 12, 0)
+        self.header_marker_edit = QTextEdit()
+        self.header_marker_edit.setMaximumHeight(60)
+        self.header_marker_edit.setPlainText(self.header_end_marker)
+        self.header_marker_edit.textChanged.connect(
+            self.on_header_marker_changed
+        )
+        params_layout.addWidget(self.header_marker_edit, 12, 1, 1, 3)
 
         layout.addWidget(params_group)
 
@@ -350,7 +408,6 @@ class RawImageGuessQt(QMainWindow):
         slider.setMaximum(max_val)
         slider.setValue(default)
 
-        # Determine callback based on which slider
         if label in [
             "Header Size:",
             "Footer Size:",
@@ -365,15 +422,6 @@ class RawImageGuessQt(QMainWindow):
             slider.valueChanged.connect(self.on_file_param_changed)
         elif label in ["Corner X:", "Corner Y:", "Corner Z:"]:
             slider.valueChanged.connect(self.on_corner_slider_changed)
-        elif label.endswith("Curve:"):
-            slider.valueChanged.connect(self.on_visual_param_changed)
-        elif label in [
-            "Crop Top:",
-            "Crop Bottom:",
-            "Crop Left:",
-            "Crop Right:",
-        ]:
-            slider.valueChanged.connect(self.on_visual_param_changed)
         else:
             slider.valueChanged.connect(self.on_visual_param_changed)
 
@@ -427,7 +475,6 @@ class RawImageGuessQt(QMainWindow):
         panel = QWidget()
         layout = QVBoxLayout(panel)
 
-        # Slice control
         slice_layout = QHBoxLayout()
         slice_layout.addWidget(QLabel("Slice:"))
         self.slice_slider = QSlider(Qt.Horizontal)
@@ -439,7 +486,6 @@ class RawImageGuessQt(QMainWindow):
         slice_layout.addWidget(self.slice_label)
         layout.addLayout(slice_layout)
 
-        # Zoom controls
         zoom_layout = QHBoxLayout()
         zoom_layout.addWidget(QLabel("Zoom:"))
         zoom_out_btn = QPushButton("Zoom Out")
@@ -456,7 +502,6 @@ class RawImageGuessQt(QMainWindow):
         zoom_layout.addStretch()
         layout.addLayout(zoom_layout)
 
-        # Image display
         self.figure = Figure(figsize=(10, 8))
         self.canvas = FigureCanvas(self.figure)
         layout.addWidget(self.canvas)
@@ -465,7 +510,6 @@ class RawImageGuessQt(QMainWindow):
         self.ax.set_title("3D Ultrasound Scrapper Preview")
         self.ax.axis("off")
 
-        # Mouse events
         self.canvas.mpl_connect("scroll_event", self.on_scroll)
         self.canvas.mpl_connect("button_press_event", self.on_mouse_press)
         self.canvas.mpl_connect("motion_notify_event", self.on_mouse_move)
@@ -480,13 +524,14 @@ class RawImageGuessQt(QMainWindow):
 
     def load_default_parameters(self):
         self.current_file = DEFAULT_IMAGE_FILE
+        self.header_end_marker = "[SCALPEL]\ncount=0"
+        self.use_header_offset = False
+        self.header_offset = 0
         self.reset_corners()
         self.update_corner_combo_items()
         self.update_all_labels()
 
     def update_all_labels(self):
-        """Update all parameter labels"""
-        # File parameters
         for slider in [
             self.header_size_slider,
             self.footer_size_slider,
@@ -505,7 +550,6 @@ class RawImageGuessQt(QMainWindow):
                 else:
                     slider.label_widget.setText(str(val))
 
-        # Enhancement
         if hasattr(self.brightness_slider, "label_widget"):
             self.brightness_slider.label_widget.setText(
                 str(self.brightness_slider.value())
@@ -529,7 +573,6 @@ class RawImageGuessQt(QMainWindow):
                 "Auto" if val == 100 else f"{val}%"
             )
 
-        # Curve
         for slider in [
             self.curve_x_pos_slider,
             self.curve_x_neg_slider,
@@ -541,7 +584,6 @@ class RawImageGuessQt(QMainWindow):
             if hasattr(slider, "label_widget"):
                 slider.label_widget.setText(str(slider.value()))
 
-        # Crop
         for slider in [
             self.crop_top_slider,
             self.crop_bottom_slider,
@@ -551,7 +593,6 @@ class RawImageGuessQt(QMainWindow):
             if hasattr(slider, "label_widget"):
                 slider.label_widget.setText(str(slider.value()))
 
-        # Corner
         for slider in [
             self.corner_x_slider,
             self.corner_y_slider,
@@ -560,13 +601,13 @@ class RawImageGuessQt(QMainWindow):
             if hasattr(slider, "label_widget"):
                 slider.label_widget.setText(str(slider.value()))
 
+        self.header_offset_label.setText(str(self.header_offset_spin.value()))
+
     def on_file_param_changed(self):
-        """Handle changes to file loading parameters - triggers reload"""
         self.update_all_labels()
         self.load_image()
 
     def on_visual_param_changed(self):
-        """Handle changes to visual parameters - just update display"""
         self.update_all_labels()
         self.update_enhancement_params()
         self.update_curve_params()
@@ -616,13 +657,14 @@ class RawImageGuessQt(QMainWindow):
 
     def browse_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Select Raw Image File", "", "All Files (*)"
+            self, "Select Image File", "", "All Files (*)"
         )
         if file_path:
             self.current_file = file_path
             self.file_path_label.setText(
                 f"File: {os.path.basename(file_path)}"
             )
+            self.parse_dicom()
 
     def get_pixel_info(self):
         pixel_type = self.pixel_type_combo.currentText()
@@ -659,6 +701,40 @@ class RawImageGuessQt(QMainWindow):
             return
 
         try:
+            # Auto-detect header using marker
+            header_size_from_marker = 0
+            if self.header_end_marker.strip():
+                raw_bytes_for_search = b""
+                if (
+                    self.dicom_selected_tag is not None
+                    and self.dicom_ds is not None
+                    and self.dicom_selected_tag in self.dicom_ds
+                ):
+                    elem = self.dicom_ds[self.dicom_selected_tag]
+                    if isinstance(elem.value, (bytes, bytearray)):
+                        raw_bytes_for_search = bytes(elem.value)
+                else:
+                    try:
+                        with open(self.current_file, "rb") as f:
+                            raw_bytes_for_search = f.read(512 * 1024)
+                    except Exception:
+                        pass
+
+                if raw_bytes_for_search:
+                    header_size_from_marker = self.find_header_end(
+                        raw_bytes_for_search
+                    )
+
+            current_header = self.header_size_slider.value()
+            if header_size_from_marker > 0:
+                self.header_size_slider.blockSignals(True)
+                self.header_size_slider.setValue(header_size_from_marker)
+                self.header_size_slider.blockSignals(False)
+                self.update_all_labels()
+                self.status_text.append(
+                    f"Auto-detected header size: {header_size_from_marker} bytes"
+                )
+
             width = self.width_slider.value()
             height = self.height_slider.value()
             depth = self.depth_slider.value()
@@ -668,6 +744,14 @@ class RawImageGuessQt(QMainWindow):
             row_stride = self.row_stride_slider.value()
             row_padding = self.row_padding_slider.value()
             slice_stride = self.slice_stride_slider.value()
+
+            # Apply header offset if enabled
+            if self.use_header_offset:
+                header_size += self.header_offset
+                self.status_text.append(
+                    f"Applied header offset: {self.header_offset}, "
+                    f"final header size: {header_size}"
+                )
 
             dtype, byte_size, components = self.get_pixel_info()
 
@@ -683,12 +767,38 @@ class RawImageGuessQt(QMainWindow):
                 header_size + skip_slices * effective_slice_stride
             )
 
-            file_size = os.path.getsize(self.current_file)
-            available_data_size = file_size - total_header_size - footer_size
+            raw_stream = None
+            raw_source_name = self.current_file
+
+            if (
+                self.dicom_selected_tag is not None
+                and self.dicom_ds is not None
+                and self.dicom_selected_tag in self.dicom_ds
+            ):
+                elem = self.dicom_ds[self.dicom_selected_tag]
+                if not isinstance(elem.value, (bytes, bytearray)):
+                    self.status_text.append(
+                        "Error: Selected DICOM tag does not contain raw bytes"
+                    )
+                    return
+                raw_bytes = bytes(elem.value)
+                raw_stream = BytesIO(raw_bytes)
+                raw_size = len(raw_bytes)
+                raw_source_name = (
+                    f"DICOM tag (0x{self.dicom_selected_tag.group:04X}"
+                    f"{self.dicom_selected_tag.element:04X})"
+                )
+            else:
+                raw_size = os.path.getsize(self.current_file)
+                raw_stream = open(self.current_file, "rb")
+
+            available_data_size = raw_size - total_header_size - footer_size
             if available_data_size <= 0:
                 self.status_text.append(
                     "Error: Not enough data after header and footer"
                 )
+                if hasattr(raw_stream, "close"):
+                    raw_stream.close()
                 return
 
             max_slices = int(
@@ -700,10 +810,12 @@ class RawImageGuessQt(QMainWindow):
                 self.status_text.append(
                     "Error: Not enough data for specified parameters"
                 )
+                if hasattr(raw_stream, "close"):
+                    raw_stream.close()
                 return
 
             image_slices = []
-            with open(self.current_file, "rb") as f:
+            with raw_stream as f:
                 for slice_idx in range(final_depth):
                     slice_position = (
                         total_header_size + slice_idx * effective_slice_stride
@@ -748,21 +860,14 @@ class RawImageGuessQt(QMainWindow):
             self.image_data = np.array(image_slices)
             final_depth = len(image_slices)
 
-            # Update slice controls
             self.slice_slider.setMaximum(final_depth - 1)
             self.current_slice = min(self.current_slice, final_depth - 1)
             self.slice_slider.setValue(self.current_slice)
 
-            # Reset view
             self.reset_zoom()
-
-            # Apply orientation operations
             self.apply_orientation_ops()
-
-            # Reset corners
             self.reset_corners()
 
-            # Update crop limits
             self.crop_top_slider.setMaximum(height - 1)
             self.crop_bottom_slider.setMaximum(height - 1)
             self.crop_left_slider.setMaximum(width - 1)
@@ -771,14 +876,14 @@ class RawImageGuessQt(QMainWindow):
             self.update_slice_display()
 
             self.status_text.append(
-                f"Loaded image: {width}x{height}x{final_depth}"
+                f"Loaded image from {raw_source_name}: "
+                f"{width}x{height}x{final_depth} (header={header_size})"
             )
 
         except Exception as e:
             self.status_text.append(f"Error loading image: {str(e)}")
 
     def apply_orientation_ops(self):
-        """Apply all recorded orientation operations"""
         if not self.orientation_ops or self.image_data is None:
             return
 
@@ -791,7 +896,6 @@ class RawImageGuessQt(QMainWindow):
                     self.current_slice = (
                         self.image_data.shape[0] - 1 - self.current_slice
                     )
-
             elif op[0] == "rotate":
                 _, axis, direction = op
                 k = 1 if direction > 0 else 3
@@ -821,17 +925,12 @@ class RawImageGuessQt(QMainWindow):
         max_slice = self.image_data.shape[0] - 1
         self.slice_label.setText(f"{self.current_slice}/{max_slice}")
 
-        # Warp slice with corners
         slice_data = self.warp_slice(self.current_slice)
-
-        # Apply crop
         slice_data = self.apply_crop_to_slice(slice_data)
 
-        # Apply enhancement
         if len(slice_data.shape) == 2:
             slice_data = self.apply_enhancement(slice_data)
 
-        # Display
         self.ax.clear()
         if len(slice_data.shape) == 3:
             self.ax.imshow(slice_data)
@@ -840,7 +939,6 @@ class RawImageGuessQt(QMainWindow):
                 slice_data, cmap="gray", vmin=self.vmin, vmax=self.vmax
             )
 
-        # Aspect ratio
         aspect_ratio = (
             self.spacing_y_spin.value() / self.spacing_x_spin.value()
         )
@@ -857,7 +955,6 @@ class RawImageGuessQt(QMainWindow):
         self.ax.set_title(title)
         self.ax.axis("off")
 
-        # Draw corner notes
         if self.show_corner_notes:
             self.draw_corner_notes()
 
@@ -874,7 +971,6 @@ class RawImageGuessQt(QMainWindow):
         cp = self.corner_positions
         corners = ["TL", "TR", "BR", "BL"]
 
-        # Account for crop when positioning notes
         H_display = H - self.crop_top - self.crop_bottom
         W_display = W - self.crop_left - self.crop_right
 
@@ -933,7 +1029,6 @@ class RawImageGuessQt(QMainWindow):
         if self.image_data is None:
             return
 
-        # Account for crop
         slice_data = self.warp_slice(self.current_slice)
         slice_data = self.apply_crop_to_slice(slice_data)
         height, width = slice_data.shape[:2]
@@ -1087,7 +1182,7 @@ class RawImageGuessQt(QMainWindow):
 
     def on_corner_selection_changed(self, idx):
         if self.use_corner_symmetry:
-            self.selected_corner_index = [0, 2][idx]  # Master corners only
+            self.selected_corner_index = [0, 2][idx]
         else:
             self.selected_corner_index = idx
         self.sync_corner_sliders()
@@ -1112,7 +1207,6 @@ class RawImageGuessQt(QMainWindow):
             self.update_slice_display()
 
     def apply_corner_symmetry(self):
-        """Mirror master corners (C000, C010) to create all 8 corners"""
         if self.corner_positions is None or self.image_data is None:
             return
 
@@ -1122,11 +1216,8 @@ class RawImageGuessQt(QMainWindow):
         c000 = self.corner_positions[0]
         c010 = self.corner_positions[2]
 
-        # Mirror across X
         self.corner_positions[1] = [2 * center[0] - c000[0], c000[1], c000[2]]
         self.corner_positions[3] = [2 * center[0] - c010[0], c010[1], c010[2]]
-
-        # Mirror across Z
         self.corner_positions[4] = [c000[0], c000[1], 2 * center[2] - c000[2]]
         self.corner_positions[5] = [
             self.corner_positions[1][0],
@@ -1174,7 +1265,6 @@ class RawImageGuessQt(QMainWindow):
         self.corner_combo.blockSignals(False)
 
     def warp_slice(self, z_idx):
-        """Warp slice using 3D trilinear corner mapping + curves"""
         try:
             from scipy import ndimage
         except ImportError:
@@ -1225,10 +1315,8 @@ class RawImageGuessQt(QMainWindow):
             + cp[7][2] * s1 * t1 * p1
         )
 
-        # Apply curves
         X, Y, Z = self.apply_curve_deformation(X, Y, Z, D, H, W)
 
-        # Resample
         if ndimage is None:
             xi = np.clip(np.rint(X), 0, W - 1).astype(int)
             yi = np.clip(np.rint(Y), 0, H - 1).astype(int)
@@ -1261,7 +1349,6 @@ class RawImageGuessQt(QMainWindow):
                 return out.astype(vol.dtype)
 
     def apply_curve_deformation(self, X, Y, Z, D, H, W):
-        """Apply curve bending to coordinates"""
         if not any(
             [
                 abs(self.curve_x_pos) > 1e-6,
@@ -1278,7 +1365,6 @@ class RawImageGuessQt(QMainWindow):
         y_norm = Y / (H - 1) if H > 1 else np.zeros_like(Y)
         z_norm = Z / (D - 1) if D > 1 else np.zeros_like(Z)
 
-        # X curves
         if abs(self.curve_x_pos) > 1e-6 or abs(self.curve_x_neg) > 1e-6:
             curve_x = np.where(
                 x_norm >= 0.5,
@@ -1288,7 +1374,6 @@ class RawImageGuessQt(QMainWindow):
             Y += curve_x * (H - 1) * 0.5 * np.sin(np.pi * y_norm)
             Z += curve_x * (D - 1) * 0.5 * np.sin(np.pi * z_norm)
 
-        # Y curves
         if abs(self.curve_y_pos) > 1e-6 or abs(self.curve_y_neg) > 1e-6:
             curve_y = np.where(
                 y_norm >= 0.5,
@@ -1298,7 +1383,6 @@ class RawImageGuessQt(QMainWindow):
             X += curve_y * (W - 1) * 0.5 * np.sin(np.pi * x_norm)
             Z += curve_y * (D - 1) * 0.5 * np.sin(np.pi * z_norm)
 
-        # Z curves
         if abs(self.curve_z_pos) > 1e-6 or abs(self.curve_z_neg) > 1e-6:
             curve_z = np.where(
                 z_norm >= 0.5,
@@ -1321,13 +1405,12 @@ class RawImageGuessQt(QMainWindow):
 
         H, W = slice_data.shape[:2]
 
-        # Validate crop values
-        if self.crop_top + self.crop_bottom >= H:
-            return slice_data
-        if self.crop_left + self.crop_right >= W:
+        if (
+            self.crop_top + self.crop_bottom >= H
+            or self.crop_left + self.crop_right >= W
+        ):
             return slice_data
 
-        # Apply crop
         if slice_data.ndim == 2:
             return slice_data[
                 self.crop_top : H - self.crop_bottom,
@@ -1383,7 +1466,6 @@ class RawImageGuessQt(QMainWindow):
                 "Vertical crop values exceed image height",
             )
             return
-
         if self.crop_left + self.crop_right >= W:
             QMessageBox.warning(
                 self,
@@ -1411,13 +1493,11 @@ class RawImageGuessQt(QMainWindow):
             f"L{self.crop_left}/R{self.crop_right}"
         )
 
-        # Reset crop sliders
         self.crop_top_slider.setValue(0)
         self.crop_bottom_slider.setValue(0)
         self.crop_left_slider.setValue(0)
         self.crop_right_slider.setValue(0)
 
-        # Update crop slider ranges
         new_height = self.image_data.shape[1]
         new_width = self.image_data.shape[2]
         self.crop_top_slider.setMaximum(new_height - 1)
@@ -1514,14 +1594,17 @@ class RawImageGuessQt(QMainWindow):
             return
 
         try:
-            # Build warped volume
             export_data = self.build_export_volume()
-
             spacing_x = self.spacing_x_spin.value()
             spacing_y = self.spacing_y_spin.value()
             spacing_z = self.spacing_z_spin.value()
             pixel_type = self.pixel_type_combo.currentText()
             endianness = self.endianness_combo.currentText()
+
+            original_header_bytes = self.get_original_header_bytes()
+            original_header_b64 = base64.b64encode(
+                original_header_bytes
+            ).decode("ascii")
 
             if export_data.ndim == 4:
                 depth, height, width, components = export_data.shape
@@ -1539,8 +1622,7 @@ class RawImageGuessQt(QMainWindow):
                 "24 bit RGB": "uchar",
             }
 
-            # Write header
-            with open(file_path, "w") as f:
+            with open(file_path, "w", newline="\n") as f:
                 f.write("NRRD0004\n")
                 f.write(f"type: {type_map[pixel_type]}\n")
                 f.write("space: left-posterior-superior\n")
@@ -1566,9 +1648,17 @@ class RawImageGuessQt(QMainWindow):
                     f"endian: {'little' if endianness == 'Little endian' else 'big'}\n"
                 )
                 f.write("encoding: raw\n")
-                f.write("space origin: (0,0,0)\n\n")
+                f.write("space origin: (0,0,0)\n")
 
-            # Write data
+                if original_header_bytes:
+                    f.write(f"raw_header_size:={len(original_header_bytes)}\n")
+                    f.write(f"raw_header_base64:={original_header_b64}\n")
+                    f.write(
+                        f"raw_header_source:={os.path.basename(self.current_file)}\n"
+                    )
+
+                f.write("\n")
+
             base_dtype_map = {
                 "8 bit unsigned": np.uint8,
                 "8 bit signed": np.int8,
@@ -1601,8 +1691,6 @@ class RawImageGuessQt(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed: {str(e)}")
 
     def build_export_volume(self):
-        """Build the complete warped volume for export"""
-        # Check if warping/crop is needed
         needs_warp = not self.are_corners_identity()
         needs_crop = (
             self.crop_top
@@ -1623,7 +1711,6 @@ class RawImageGuessQt(QMainWindow):
         return np.stack(slices, axis=0)
 
     def are_corners_identity(self):
-        """Check if corners are in default positions"""
         if self.image_data is not None:
             d, h, w = self.image_data.shape[:3]
         else:
@@ -1639,7 +1726,6 @@ class RawImageGuessQt(QMainWindow):
         return np.array_equal(self.corner_positions, default_corners)
 
     def get_current_config(self):
-        """Get current configuration as dictionary"""
         return {
             "current_file": getattr(self, "current_file", DEFAULT_IMAGE_FILE),
             "pixel_type": self.pixel_type_combo.currentText(),
@@ -1680,12 +1766,13 @@ class RawImageGuessQt(QMainWindow):
             ),
             "selected_corner_index": self.selected_corner_index,
             "orientation_ops": self.orientation_ops,
+            "header_end_marker": self.header_end_marker,
+            "use_header_offset": self.use_header_offset,
+            "header_offset": self.header_offset,
         }
 
     def apply_config(self, config):
-        """Apply configuration from dictionary"""
         try:
-            # Block signals on all widgets
             all_widgets = [
                 self.pixel_type_combo,
                 self.endianness_combo,
@@ -1718,19 +1805,18 @@ class RawImageGuessQt(QMainWindow):
                 self.crop_right_slider,
                 self.corner_notes_checkbox,
                 self.corner_symmetry_checkbox,
+                self.header_offset_checkbox,
             ]
 
             for widget in all_widgets:
                 widget.blockSignals(True)
 
-            # Apply file parameters
             if "current_file" in config:
                 self.current_file = config["current_file"]
                 self.file_path_label.setText(
                     f"File: {os.path.basename(self.current_file)}"
                 )
 
-            # Apply combo boxes
             if "pixel_type" in config:
                 idx = self.pixel_type_combo.findText(config["pixel_type"])
                 if idx >= 0:
@@ -1741,7 +1827,6 @@ class RawImageGuessQt(QMainWindow):
                 if idx >= 0:
                     self.endianness_combo.setCurrentIndex(idx)
 
-            # Apply sliders
             slider_map = {
                 "header_size": self.header_size_slider,
                 "footer_size": self.footer_size_slider,
@@ -1773,7 +1858,6 @@ class RawImageGuessQt(QMainWindow):
                 if key in config:
                     slider.setValue(int(config[key]))
 
-            # Apply spinboxes
             spinbox_map = {
                 "spacing_x": self.spacing_x_spin,
                 "spacing_y": self.spacing_y_spin,
@@ -1784,7 +1868,11 @@ class RawImageGuessQt(QMainWindow):
                 if key in config:
                     spinbox.setValue(float(config[key]))
 
-            # Apply checkboxes
+            if "header_offset" in config:
+                self.header_offset_spin.setValue(
+                    int(float(config["header_offset"]))
+                )
+
             if "show_corner_notes" in config:
                 self.corner_notes_checkbox.setChecked(
                     bool(config["show_corner_notes"])
@@ -1793,34 +1881,41 @@ class RawImageGuessQt(QMainWindow):
                 self.corner_symmetry_checkbox.setChecked(
                     bool(config["use_corner_symmetry"])
                 )
+            if "use_header_offset" in config:
+                self.header_offset_checkbox.setChecked(
+                    bool(config["use_header_offset"])
+                )
 
-            # Apply corner symmetry and state
             self.use_corner_symmetry = config.get("use_corner_symmetry", True)
             self.show_corner_notes = config.get("show_corner_notes", True)
+            self.use_header_offset = config.get("use_header_offset", False)
 
-            # Apply selected corner index
             if "selected_corner_index" in config:
                 self.selected_corner_index = int(
                     config["selected_corner_index"]
                 )
 
-            # Apply orientation history
             if "orientation_ops" in config:
                 self.orientation_ops = list(config["orientation_ops"])
 
-            # Restore signals
             for widget in all_widgets:
                 widget.blockSignals(False)
 
-            # Update everything
             self.update_all_labels()
             self.update_enhancement_params()
             self.update_curve_params()
             self.update_crop_params()
             self.update_corner_combo_items()
 
-            # Load corner positions AFTER image is loaded
-            # We need to defer this until after the image loads
+            if "header_end_marker" in config:
+                self.header_end_marker = config["header_end_marker"]
+                if hasattr(self, "header_marker_edit"):
+                    self.header_marker_edit.blockSignals(True)
+                    self.header_marker_edit.setPlainText(
+                        self.header_end_marker
+                    )
+                    self.header_marker_edit.blockSignals(False)
+
             if "corner_positions" in config and config["corner_positions"]:
                 self._pending_corner_positions = np.array(
                     config["corner_positions"]
@@ -1828,7 +1923,6 @@ class RawImageGuessQt(QMainWindow):
             else:
                 self._pending_corner_positions = None
 
-            # Trigger image load which will apply corner positions
             self.load_image()
 
             self.status_text.append("Configuration loaded successfully")
@@ -1839,145 +1933,7 @@ class RawImageGuessQt(QMainWindow):
                 self, "Error", f"Failed to apply config: {str(e)}"
             )
 
-    def load_image(self):
-        if not os.path.exists(self.current_file):
-            self.status_text.append(
-                f"Error: File {self.current_file} not found"
-            )
-            return
-
-        try:
-            width = self.width_slider.value()
-            height = self.height_slider.value()
-            depth = self.depth_slider.value()
-            header_size = self.header_size_slider.value()
-            footer_size = self.footer_size_slider.value()
-            skip_slices = self.skip_slices_slider.value()
-            row_stride = self.row_stride_slider.value()
-            row_padding = self.row_padding_slider.value()
-            slice_stride = self.slice_stride_slider.value()
-
-            dtype, byte_size, components = self.get_pixel_info()
-
-            row_data_size = width * byte_size * components
-            effective_row_stride = (
-                row_stride if row_stride > 0 else row_data_size + row_padding
-            )
-
-            slice_data_size = height * effective_row_stride
-            effective_slice_stride = slice_data_size + slice_stride
-
-            total_header_size = (
-                header_size + skip_slices * effective_slice_stride
-            )
-
-            file_size = os.path.getsize(self.current_file)
-            available_data_size = file_size - total_header_size - footer_size
-            if available_data_size <= 0:
-                self.status_text.append(
-                    "Error: Not enough data after header and footer"
-                )
-                return
-
-            max_slices = int(
-                (available_data_size + slice_stride) / effective_slice_stride
-            )
-            final_depth = min(depth, max_slices)
-
-            if final_depth <= 0:
-                self.status_text.append(
-                    "Error: Not enough data for specified parameters"
-                )
-                return
-
-            image_slices = []
-            with open(self.current_file, "rb") as f:
-                for slice_idx in range(final_depth):
-                    slice_position = (
-                        total_header_size + slice_idx * effective_slice_stride
-                    )
-
-                    if effective_row_stride == row_data_size:
-                        f.seek(slice_position)
-                        slice_bytes = f.read(height * row_data_size)
-                        if len(slice_bytes) < height * row_data_size:
-                            break
-                        slice_data = np.frombuffer(slice_bytes, dtype=dtype)
-                    else:
-                        row_data_list = []
-                        for row_idx in range(height):
-                            row_position = (
-                                slice_position + row_idx * effective_row_stride
-                            )
-                            f.seek(row_position)
-                            row_bytes = f.read(row_data_size)
-                            if len(row_bytes) < row_data_size:
-                                break
-                            row_data_list.append(
-                                np.frombuffer(row_bytes, dtype=dtype)
-                            )
-                        if len(row_data_list) != height:
-                            break
-                        slice_data = np.concatenate(row_data_list)
-
-                    if components == 1:
-                        slice_data = slice_data.reshape((height, width))
-                    else:
-                        slice_data = slice_data.reshape(
-                            (height, width, components)
-                        )
-
-                    image_slices.append(slice_data)
-
-            if not image_slices:
-                self.status_text.append("Error: No valid slices could be read")
-                return
-
-            self.image_data = np.array(image_slices)
-            final_depth = len(image_slices)
-
-            # Update slice controls
-            self.slice_slider.setMaximum(final_depth - 1)
-            self.current_slice = min(self.current_slice, final_depth - 1)
-            self.slice_slider.setValue(self.current_slice)
-
-            # Reset view
-            self.reset_zoom()
-
-            # Apply orientation operations
-            self.apply_orientation_ops()
-
-            # Update crop limits
-            self.crop_top_slider.setMaximum(self.image_data.shape[1] - 1)
-            self.crop_bottom_slider.setMaximum(self.image_data.shape[1] - 1)
-            self.crop_left_slider.setMaximum(self.image_data.shape[2] - 1)
-            self.crop_right_slider.setMaximum(self.image_data.shape[2] - 1)
-
-            # Handle pending corner positions from config load
-            if hasattr(self, "_pending_corner_positions"):
-                if self._pending_corner_positions is not None:
-                    self.corner_positions = self._pending_corner_positions
-                    self.setup_corner_slider_ranges()
-                    if self.use_corner_symmetry:
-                        self.apply_corner_symmetry()
-                    self.sync_corner_sliders()
-                else:
-                    self.reset_corners()
-                delattr(self, "_pending_corner_positions")
-            else:
-                self.reset_corners()
-
-            self.update_slice_display()
-
-            self.status_text.append(
-                f"Loaded image: {width}x{height}x{final_depth}"
-            )
-
-        except Exception as e:
-            self.status_text.append(f"Error loading image: {str(e)}")
-
     def save_config(self):
-        """Save current configuration to JSON file"""
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Configuration",
@@ -2002,7 +1958,6 @@ class RawImageGuessQt(QMainWindow):
             )
 
     def load_config_dialog(self):
-        """Load configuration from JSON file"""
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Load Configuration",
@@ -2013,7 +1968,6 @@ class RawImageGuessQt(QMainWindow):
             self.load_config(file_path)
 
     def load_config(self, file_path):
-        """Load configuration from file"""
         try:
             with open(file_path, "r") as f:
                 config = json.load(f)
@@ -2024,6 +1978,149 @@ class RawImageGuessQt(QMainWindow):
             QMessageBox.critical(
                 self, "Error", f"Failed to load config: {str(e)}"
             )
+
+    def parse_dicom(self):
+        try:
+            self.dicom_ds = pydicom.dcmread(self.current_file, force=True)
+            self.ob_tags = []
+
+            for elem in self.dicom_ds.iterall():
+                if elem.value is None:
+                    continue
+                try:
+                    length = len(elem.value)
+                except TypeError:
+                    continue
+                if length <= 100:
+                    continue
+                self.ob_tags.append((elem.name, length, elem.tag))
+
+            self.dicom_tag_combo.clear()
+            self.dicom_tag_combo.addItem("-- No tag selected --")
+            for name, length, tag in self.ob_tags:
+                self.dicom_tag_combo.addItem(
+                    f"{name} (0x{tag.group:04X}{tag.element:04X}) - {length} bytes"
+                )
+
+            self.dicom_tags_label.setText(
+                f"Found {len(self.ob_tags)} tags > 100 bytes"
+            )
+            self.dicom_selected_tag = None
+        except Exception as e:
+            self.status_text.append(f"DICOM parse error: {str(e)}")
+            self.dicom_ds = None
+            self.ob_tags = []
+            self.dicom_tag_combo.clear()
+            self.dicom_tags_label.setText("DICOM parse error")
+
+    def on_dicom_tag_changed(self, index):
+        if index <= 0:
+            self.dicom_selected_tag = None
+        else:
+            self.dicom_selected_tag = self.ob_tags[index - 1][2]
+        self.on_file_param_changed()
+
+    def get_original_header_bytes(self):
+        header_size = self.header_size_slider.value()
+        if header_size <= 0:
+            return b""
+
+        if (
+            self.dicom_selected_tag is not None
+            and self.dicom_ds is not None
+            and self.dicom_selected_tag in self.dicom_ds
+        ):
+            elem = self.dicom_ds[self.dicom_selected_tag]
+            if not isinstance(elem.value, (bytes, bytearray)):
+                return b""
+            raw_bytes = bytes(elem.value)
+            return raw_bytes[:header_size]
+
+        if not os.path.exists(self.current_file):
+            return b""
+
+        with open(self.current_file, "rb") as f:
+            return f.read(header_size)
+
+    def find_header_end(self, data: bytes) -> int:
+        if not self.header_end_marker or not data:
+            return 0
+
+        import re
+
+        marker_text = self.header_end_marker
+        marker_bytes = marker_text.encode("utf-8")
+
+        pos_exact = data.find(marker_bytes)
+        if pos_exact != -1:
+            end_pos = pos_exact + len(marker_bytes)
+            while end_pos < len(data) and data[end_pos : end_pos + 1] in (
+                b"\n",
+                b"\r",
+            ):
+                end_pos += 1
+            return end_pos
+
+        marker_lines = [
+            line for line in marker_text.splitlines() if line.strip()
+        ]
+        if not marker_lines:
+            return 0
+
+        alt_candidates = []
+        if len(marker_lines) >= 2:
+            alt_candidates = [
+                "\n".join(marker_lines).encode("utf-8"),
+                "\n\n".join(marker_lines).encode("utf-8"),
+                "\r\n".join(marker_lines).encode("utf-8"),
+                "\r\n\r\n".join(marker_lines).encode("utf-8"),
+            ]
+
+        for alt in alt_candidates:
+            alt_pos = data.find(alt)
+            if alt_pos != -1:
+                end_pos = alt_pos + len(alt)
+                while end_pos < len(data) and data[end_pos : end_pos + 1] in (
+                    b"\n",
+                    b"\r",
+                ):
+                    end_pos += 1
+                return end_pos
+
+        regex_pattern = rb""
+        for i, line in enumerate(marker_lines):
+            if i > 0:
+                regex_pattern += rb"\r?\n(?:\r?\n)*"
+            regex_pattern += re.escape(line.encode("utf-8"))
+
+        regex_match = re.search(regex_pattern, data, flags=re.DOTALL)
+        if regex_match is not None:
+            end_pos = regex_match.end()
+            while end_pos < len(data) and data[end_pos : end_pos + 1] in (
+                b"\n",
+                b"\r",
+            ):
+                end_pos += 1
+            return end_pos
+
+        return 0
+
+    def on_header_marker_changed(self):
+        new_marker = self.header_marker_edit.toPlainText().strip()
+        if new_marker != self.header_end_marker:
+            self.header_end_marker = new_marker
+            self.on_file_param_changed()
+
+    def on_header_offset_toggled(self, checked):
+        self.use_header_offset = checked
+        self.header_offset_spin.setEnabled(checked)
+        if checked:
+            self.on_file_param_changed()
+
+    def on_header_offset_changed(self):
+        self.header_offset = self.header_offset_spin.value()
+        self.update_all_labels()
+        self.load_image()
 
 
 def main():

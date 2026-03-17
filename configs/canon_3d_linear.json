@@ -1,8 +1,8 @@
 {
-    "current_file": "C:/Users/adamm/Downloads/1305271376",
+    "current_file": "test.dcm",
     "pixel_type": "8 bit unsigned",
     "endianness": "Little endian",
-    "header_size": 224417,
+    "header_size": 222304,
     "footer_size": 0,
     "width": 440,
     "height": 179,
@@ -11,7 +11,7 @@
     "depth": 65,
     "skip_slices": 0,
     "slice_stride": 448,
-    "spacing_x": 1.7999999999999998,
+    "spacing_x": 1.8,
     "spacing_y": 1.0,
     "spacing_z": 1.0,
     "brightness": -21,
@@ -25,22 +25,22 @@
     "curve_y_neg": 0,
     "curve_z_pos": 0,
     "curve_z_neg": 0,
-    "crop_top": 0,
-    "crop_bottom": 8,
-    "crop_left": 6,
+    "crop_top": 6,
+    "crop_bottom": 0,
+    "crop_left": 3,
     "crop_right": 0,
     "use_corner_symmetry": true,
-    "show_corner_notes": true,
+    "show_corner_notes": false,
     "corner_positions": [
         [
             0.0,
             0.0,
-            -15.0
+            0.0
         ],
         [
             178.0,
             0.0,
-            -15.0
+            0.0
         ],
         [
             0.0,
@@ -55,12 +55,12 @@
         [
             0.0,
             0.0,
-            79.0
+            64.0
         ],
         [
             178.0,
             0.0,
-            79.0
+            64.0
         ],
         [
             0.0,
@@ -78,27 +78,20 @@
         [
             "rotate",
             "z",
-            -1
+            1
         ],
         [
             "rotate",
             "z",
-            -1
+            1
         ],
         [
             "rotate",
             "z",
-            -1
-        ],
-        [
-            "rotate",
-            "z",
-            -1
-        ],
-        [
-            "rotate",
-            "z",
-            -1
+            1
         ]
-    ]
+    ],
+    "header_end_marker": "[SCALPEL]\ncount=0",
+    "use_header_offset": true,
+    "header_offset": -102
 }

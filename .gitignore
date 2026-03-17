@@ -4,3 +4,4 @@ out/
 scripts/build
 scripts/dist
 *.specdist/
+dist/
