@@ -10,6 +10,12 @@ import sys
 
 import numpy as np
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
+
+from shared.config_parsing import config_to_params
+from shared.geometry import build_export_volume
+from shared.nrrd_io import save_nrrd as save_nrrd_shared
+from shared.raw_io import read_raw_volume
+from shared.types import NrrdParams, VolumeParams
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -236,381 +242,11 @@ class BatchImageProcessor:
     """Non-UI processor for batch operations"""
 
     def __init__(self, config):
-        self.config = config
-        self.image_data = None
         self.current_file = None
-
-        # File parameters
-        self.pixel_type = config.get("pixel_type", "8 bit unsigned")
-        self.endianness = config.get("endianness", "Little endian")
-        self.header_size = config.get("header_size", 0)
-        self.footer_size = config.get("footer_size", 0)
-        self.width = config.get("width", 424)
-        self.height = config.get("height", 127)
-        self.depth = config.get("depth", 317)
-        self.row_stride = config.get("row_stride", 0)
-        self.row_padding = config.get("row_padding", 0)
-        self.slice_stride = config.get("slice_stride", 0)
-        self.skip_slices = config.get("skip_slices", 0)
-
-        # Dynamic header marker/offset
-        self.header_end_marker = config.get(
-            "header_end_marker", "[SCALPEL]\ncount=0"
-        )
-        self.use_header_offset = bool(config.get("use_header_offset", False))
-        self.header_offset = int(config.get("header_offset", 0))
-
-        # Spacing
-        self.spacing_x = config.get("spacing_x", 1.0)
-        self.spacing_y = config.get("spacing_y", 2.6)
-        self.spacing_z = config.get("spacing_z", 1.0)
-
-        # Orientation operations
-        self.orientation_ops = list(config.get("orientation_ops", []))
-
-        # Crop parameters
-        self.crop_top = config.get("crop_top", 0)
-        self.crop_bottom = config.get("crop_bottom", 0)
-        self.crop_left = config.get("crop_left", 0)
-        self.crop_right = config.get("crop_right", 0)
-
-        # Corner positions (to be applied after orientation)
-        self._pending_corner_positions = None
-        if config.get("corner_positions") is not None:
-            self._pending_corner_positions = np.array(
-                config["corner_positions"]
-            )
-
-        self.corner_positions = None
-        self.use_corner_symmetry = bool(
-            config.get("use_corner_symmetry", True)
-        )
-
-        # Curve parameters
-        self.curve_x_pos = config.get("curve_x_pos", 0) / 100.0
-        self.curve_x_neg = config.get("curve_x_neg", 0) / 100.0
-        self.curve_y_pos = config.get("curve_y_pos", 0) / 100.0
-        self.curve_y_neg = config.get("curve_y_neg", 0) / 100.0
-        self.curve_z_pos = config.get("curve_z_pos", 0) / 100.0
-        self.curve_z_neg = config.get("curve_z_neg", 0) / 100.0
+        self.params = config_to_params(config)
 
     def set_input_file(self, file_path):
         self.current_file = file_path
-
-    def find_header_end(self, data: bytes) -> int:
-        if not self.header_end_marker or not data:
-            return 0
-
-        import re
-
-        marker_text = self.header_end_marker
-        marker_bytes = marker_text.encode("utf-8")
-
-        pos_exact = data.find(marker_bytes)
-        if pos_exact != -1:
-            end_pos = pos_exact + len(marker_bytes)
-            while end_pos < len(data) and data[end_pos : end_pos + 1] in (
-                b"\n",
-                b"\r",
-            ):
-                end_pos += 1
-            return end_pos
-
-        marker_lines = [
-            line for line in marker_text.splitlines() if line.strip()
-        ]
-        if not marker_lines:
-            return 0
-
-        alt_candidates = []
-        if len(marker_lines) >= 2:
-            alt_candidates = [
-                "\n".join(marker_lines).encode("utf-8"),
-                "\n\n".join(marker_lines).encode("utf-8"),
-                "\r\n".join(marker_lines).encode("utf-8"),
-                "\r\n\r\n".join(marker_lines).encode("utf-8"),
-            ]
-
-        for alt in alt_candidates:
-            alt_pos = data.find(alt)
-            if alt_pos != -1:
-                end_pos = alt_pos + len(alt)
-                while end_pos < len(data) and data[end_pos : end_pos + 1] in (
-                    b"\n",
-                    b"\r",
-                ):
-                    end_pos += 1
-                return end_pos
-
-        regex_pattern = rb""
-        for i, line in enumerate(marker_lines):
-            if i > 0:
-                regex_pattern += rb"\r?\n(?:\r?\n)*"
-            regex_pattern += re.escape(line.encode("utf-8"))
-
-        regex_match = re.search(regex_pattern, data, flags=re.DOTALL)
-        if regex_match is not None:
-            end_pos = regex_match.end()
-            while end_pos < len(data) and data[end_pos : end_pos + 1] in (
-                b"\n",
-                b"\r",
-            ):
-                end_pos += 1
-            return end_pos
-
-        return 0
-
-    def get_pixel_info(self):
-        """Get pixel type information"""
-        type_map = {
-            "8 bit unsigned": (np.uint8, 1, 1),
-            "8 bit signed": (np.int8, 1, 1),
-            "16 bit unsigned": (np.uint16, 2, 1),
-            "16 bit signed": (np.int16, 2, 1),
-            "float": (np.float32, 4, 1),
-            "double": (np.float64, 8, 1),
-            "24 bit RGB": (np.uint8, 1, 3),
-        }
-
-        dtype, byte_size, components = type_map[self.pixel_type]
-
-        if self.endianness == "Big endian" and byte_size > 1:
-            dtype_map = {
-                np.uint16: ">u2",
-                np.int16: ">i2",
-                np.float32: ">f4",
-                np.float64: ">f8",
-            }
-            dtype = dtype_map.get(dtype, dtype)
-
-        return dtype, byte_size, components
-
-    def apply_orientation_ops(self):
-        """Apply all recorded orientation operations - matches test.py logic"""
-        if not self.orientation_ops or self.image_data is None:
-            return
-
-        for op in self.orientation_ops:
-            if op[0] == "flip":
-                _, axis = op
-                axis_map = {"z": 0, "y": 1, "x": 2}
-                self.image_data = np.flip(self.image_data, axis=axis_map[axis])
-
-            elif op[0] == "rotate":
-                _, axis, direction = op
-                k = 1 if direction > 0 else 3
-                if axis == "z":
-                    self.image_data = np.rot90(
-                        self.image_data, k=k, axes=(1, 2)
-                    )
-                elif axis == "x":
-                    self.image_data = np.rot90(
-                        self.image_data, k=k, axes=(0, 1)
-                    )
-                elif axis == "y":
-                    self.image_data = np.rot90(
-                        self.image_data, k=k, axes=(0, 2)
-                    )
-
-    def reset_corners(self):
-        """Reset corners to identity positions for current volume dimensions"""
-        if self.image_data is not None:
-            d, h, w = self.image_data.shape[:3]
-        else:
-            w = self.width
-            h = self.height
-            d = self.depth
-
-        self.corner_positions = np.zeros((8, 3), dtype=np.float64)
-        for idx in range(8):
-            ix, iy, iz = (idx >> 0) & 1, (idx >> 1) & 1, (idx >> 2) & 1
-            self.corner_positions[idx] = [
-                ix * (w - 1),
-                iy * (h - 1),
-                iz * (d - 1),
-            ]
-
-    def apply_curve_deformation(self, X, Y, Z, D, H, W):
-        """Apply curve bending to coordinates"""
-        if not any(
-            [
-                abs(self.curve_x_pos) > 1e-6,
-                abs(self.curve_x_neg) > 1e-6,
-                abs(self.curve_y_pos) > 1e-6,
-                abs(self.curve_y_neg) > 1e-6,
-                abs(self.curve_z_pos) > 1e-6,
-                abs(self.curve_z_neg) > 1e-6,
-            ]
-        ):
-            return X, Y, Z
-
-        x_norm = X / (W - 1) if W > 1 else np.zeros_like(X)
-        y_norm = Y / (H - 1) if H > 1 else np.zeros_like(Y)
-        z_norm = Z / (D - 1) if D > 1 else np.zeros_like(Z)
-
-        # X curves
-        if abs(self.curve_x_pos) > 1e-6 or abs(self.curve_x_neg) > 1e-6:
-            curve_x = np.where(
-                x_norm >= 0.5,
-                self.curve_x_pos * (x_norm - 0.5) * 2.0,
-                self.curve_x_neg * (0.5 - x_norm) * 2.0,
-            )
-            Y += curve_x * (H - 1) * 0.5 * np.sin(np.pi * y_norm)
-            Z += curve_x * (D - 1) * 0.5 * np.sin(np.pi * z_norm)
-
-        # Y curves
-        if abs(self.curve_y_pos) > 1e-6 or abs(self.curve_y_neg) > 1e-6:
-            curve_y = np.where(
-                y_norm >= 0.5,
-                self.curve_y_pos * (y_norm - 0.5) * 2.0,
-                self.curve_y_neg * (0.5 - y_norm) * 2.0,
-            )
-            X += curve_y * (W - 1) * 0.5 * np.sin(np.pi * x_norm)
-            Z += curve_y * (D - 1) * 0.5 * np.sin(np.pi * z_norm)
-
-        # Z curves
-        if abs(self.curve_z_pos) > 1e-6 or abs(self.curve_z_neg) > 1e-6:
-            curve_z = np.where(
-                z_norm >= 0.5,
-                self.curve_z_pos * (z_norm - 0.5) * 2.0,
-                self.curve_z_neg * (0.5 - z_norm) * 2.0,
-            )
-            X += curve_z * (W - 1) * 0.5 * np.sin(np.pi * x_norm)
-            Y += curve_z * (H - 1) * 0.5 * np.sin(np.pi * y_norm)
-
-        return X, Y, Z
-
-    def warp_slice(self, z_idx):
-        """Warp slice using 3D trilinear corner mapping + curves"""
-        try:
-            from scipy import ndimage
-        except ImportError:
-            ndimage = None
-
-        vol = self.image_data
-        D, H, W = vol.shape[:3]
-        C = 1 if vol.ndim == 3 else vol.shape[3]
-
-        xs = np.linspace(0.0, 1.0, W) if W > 1 else np.zeros(W)
-        ys = np.linspace(0.0, 1.0, H) if H > 1 else np.zeros(H)
-        wval = 0.0 if D <= 1 else z_idx / (D - 1)
-
-        uu, vv = np.meshgrid(xs, ys)
-        s0, s1 = 1.0 - uu, uu
-        t0, t1 = 1.0 - vv, vv
-        p0, p1 = 1.0 - wval, wval
-
-        cp = self.corner_positions
-        X = (
-            cp[0][0] * s0 * t0 * p0
-            + cp[1][0] * s1 * t0 * p0
-            + cp[2][0] * s0 * t1 * p0
-            + cp[3][0] * s1 * t1 * p0
-            + cp[4][0] * s0 * t0 * p1
-            + cp[5][0] * s1 * t0 * p1
-            + cp[6][0] * s0 * t1 * p1
-            + cp[7][0] * s1 * t1 * p1
-        )
-        Y = (
-            cp[0][1] * s0 * t0 * p0
-            + cp[1][1] * s1 * t0 * p0
-            + cp[2][1] * s0 * t1 * p0
-            + cp[3][1] * s1 * t1 * p0
-            + cp[4][1] * s0 * t0 * p1
-            + cp[5][1] * s1 * t0 * p1
-            + cp[6][1] * s0 * t1 * p1
-            + cp[7][1] * s1 * t1 * p1
-        )
-        Z = (
-            cp[0][2] * s0 * t0 * p0
-            + cp[1][2] * s1 * t0 * p0
-            + cp[2][2] * s0 * t1 * p0
-            + cp[3][2] * s1 * t1 * p0
-            + cp[4][2] * s0 * t0 * p1
-            + cp[5][2] * s1 * t0 * p1
-            + cp[6][2] * s0 * t1 * p1
-            + cp[7][2] * s1 * t1 * p1
-        )
-
-        # Apply curves
-        X, Y, Z = self.apply_curve_deformation(X, Y, Z, D, H, W)
-
-        # Resample
-        if ndimage is None:
-            xi = np.clip(np.rint(X), 0, W - 1).astype(int)
-            yi = np.clip(np.rint(Y), 0, H - 1).astype(int)
-            zi = np.clip(np.rint(Z), 0, D - 1).astype(int)
-            if C == 1:
-                return vol[zi, yi, xi]
-            else:
-                out = np.zeros((H, W, C), dtype=vol.dtype)
-                for c in range(C):
-                    out[..., c] = vol[zi, yi, xi, c]
-                return out
-        else:
-            if C == 1:
-                return ndimage.map_coordinates(
-                    vol, [Z, Y, X], order=1, mode="constant", cval=0.0
-                )
-            else:
-                out = np.zeros((H, W, C), dtype=np.float64)
-                for c in range(C):
-                    out[..., c] = ndimage.map_coordinates(
-                        vol[..., c],
-                        [Z, Y, X],
-                        order=1,
-                        mode="constant",
-                        cval=0.0,
-                    )
-                if np.issubdtype(vol.dtype, np.integer):
-                    info = np.iinfo(vol.dtype)
-                    out = np.clip(out, info.min, info.max).astype(vol.dtype)
-                return out.astype(vol.dtype)
-
-    def apply_crop_to_slice(self, slice_data):
-        """Apply crop to a single slice"""
-        if not (
-            self.crop_top
-            or self.crop_bottom
-            or self.crop_left
-            or self.crop_right
-        ):
-            return slice_data
-
-        H, W = slice_data.shape[:2]
-
-        if self.crop_top + self.crop_bottom >= H:
-            return slice_data
-        if self.crop_left + self.crop_right >= W:
-            return slice_data
-
-        if slice_data.ndim == 2:
-            return slice_data[
-                self.crop_top : H - self.crop_bottom,
-                self.crop_left : W - self.crop_right,
-            ]
-        else:
-            return slice_data[
-                self.crop_top : H - self.crop_bottom,
-                self.crop_left : W - self.crop_right,
-                :,
-            ]
-
-    def are_corners_identity(self):
-        """Check if corners are in default positions"""
-        if self.image_data is not None:
-            d, h, w = self.image_data.shape[:3]
-        else:
-            w = self.width
-            h = self.height
-            d = self.depth
-
-        default_corners = np.zeros((8, 3), dtype=np.float64)
-        for idx in range(8):
-            ix, iy, iz = (idx >> 0) & 1, (idx >> 1) & 1, (idx >> 2) & 1
-            default_corners[idx] = [ix * (w - 1), iy * (h - 1), iz * (d - 1)]
-
-        return np.array_equal(self.corner_positions, default_corners)
 
     def process_file(self):
         """Process a single file using the configuration"""
@@ -618,215 +254,57 @@ class BatchImageProcessor:
             return None
 
         try:
-            # Dynamic header detection (marker) + optional offset.
-            # Keep this as a per-file local variable so multiple files don't accumulate offsets.
-            header_size = self.header_size
-            if getattr(self, "header_end_marker", "").strip():
-                raw_bytes_for_search = b""
-                try:
-                    with open(self.current_file, "rb") as f:
-                        raw_bytes_for_search = f.read(512 * 1024)
-                except OSError:
-                    raw_bytes_for_search = b""
+            p = self.params
 
-                header_size_from_marker = self.find_header_end(
-                    raw_bytes_for_search
-                )
-                if header_size_from_marker > 0:
-                    header_size = header_size_from_marker
-
-            if getattr(self, "use_header_offset", False):
-                header_size += int(getattr(self, "header_offset", 0))
-
-            dtype, byte_size, components = self.get_pixel_info()
-
-            row_data_size = self.width * byte_size * components
-            if self.row_stride > 0:
-                effective_row_stride = self.row_stride
-            else:
-                effective_row_stride = row_data_size + self.row_padding
-
-            slice_data_size = self.height * effective_row_stride
-            effective_slice_stride = slice_data_size + self.slice_stride
-
-            total_header_size = (
-                header_size + self.skip_slices * effective_slice_stride
+            volume = read_raw_volume(
+                self.current_file,
+                p.volume,
+                p.raw_layout,
             )
-
-            file_size = os.path.getsize(self.current_file)
-            available_data_size = (
-                file_size - total_header_size - self.footer_size
-            )
-
-            if available_data_size <= 0:
+            if volume is None:
                 return None
 
-            max_slices = int(
-                (available_data_size + self.slice_stride)
-                / effective_slice_stride
-            )
-            final_depth = min(self.depth, max_slices)
+            from shared.geometry import apply_orientation
+            from shared.types import OrientationParams
 
-            if final_depth <= 0:
-                return None
+            volume = apply_orientation(volume, p.orientation)
 
-            # Load image data
-            image_slices = []
-            with open(self.current_file, "rb") as f:
-                for slice_idx in range(final_depth):
-                    slice_position = (
-                        total_header_size + slice_idx * effective_slice_stride
-                    )
+            volume = build_export_volume(volume, p.warp, p.curve, p.crop)
 
-                    if effective_row_stride == row_data_size:
-                        f.seek(slice_position)
-                        slice_bytes = f.read(self.height * row_data_size)
-                        if len(slice_bytes) < self.height * row_data_size:
-                            break
-                        slice_data = np.frombuffer(slice_bytes, dtype=dtype)
-                    else:
-                        row_data_list = []
-                        for row_idx in range(self.height):
-                            row_position = (
-                                slice_position + row_idx * effective_row_stride
-                            )
-                            f.seek(row_position)
-                            row_bytes = f.read(row_data_size)
-                            if len(row_bytes) < row_data_size:
-                                break
-                            row_data = np.frombuffer(row_bytes, dtype=dtype)
-                            row_data_list.append(row_data)
-                        if len(row_data_list) != self.height:
-                            break
-                        slice_data = np.concatenate(row_data_list)
-
-                    if components == 1:
-                        slice_data = slice_data.reshape(
-                            (self.height, self.width)
-                        )
-                    else:
-                        slice_data = slice_data.reshape(
-                            (self.height, self.width, components)
-                        )
-
-                    image_slices.append(slice_data)
-
-            if not image_slices:
-                return None
-
-            self.image_data = np.array(image_slices)
-
-            # Apply orientation operations
-            self.apply_orientation_ops()
-
-            # Handle pending corner positions from config
-            # Apply AFTER orientation, just like test.py
-            if self._pending_corner_positions is not None:
-                self.corner_positions = self._pending_corner_positions
-            else:
-                self.reset_corners()
-
-            # Build export volume with warping and cropping
-            needs_warp = not self.are_corners_identity()
-            needs_crop = (
-                self.crop_top
-                or self.crop_bottom
-                or self.crop_left
-                or self.crop_right
-            )
-
-            if needs_warp or needs_crop:
-                D = self.image_data.shape[0]
-                slices = []
-                for z in range(D):
-                    slice_data = self.warp_slice(z)
-                    slice_data = self.apply_crop_to_slice(slice_data)
-                    slices.append(slice_data)
-                self.image_data = np.stack(slices, axis=0)
-
-            return self.image_data
-
+            return volume
         except Exception as e:
             print(f"Error processing {self.current_file}: {str(e)}")
             return None
 
     def save_nrrd(self, data, output_path):
         """Save data as NRRD file"""
-        try:
-            if data.ndim == 4:
-                depth, height, width, components = data.shape
-            else:
-                depth, height, width = data.shape
-                components = 1
+        if data is None:
+            return
 
-            type_map = {
-                "8 bit unsigned": "uchar",
-                "8 bit signed": "signed char",
-                "16 bit unsigned": "ushort",
-                "16 bit signed": "short",
-                "float": "float",
-                "double": "double",
-                "24 bit RGB": "uchar",
-            }
+        if data.ndim == 4:
+            depth, height, width = data.shape[:3]
+        else:
+            depth, height, width = data.shape
 
-            with open(output_path, "w") as f:
-                f.write("NRRD0004\n")
-                f.write("# Complete NRRD file format specification at:\n")
-                f.write("# http://teem.sourceforge.net/nrrd/format.html\n")
-                f.write(f"type: {type_map[self.pixel_type]}\n")
-                f.write("space: left-posterior-superior\n")
+        p = self.params
+        volume_params = VolumeParams(
+            width=width,
+            height=height,
+            depth=depth,
+            pixel_type=p.volume.pixel_type,
+            endianness=p.volume.endianness,
+            spacing_x=p.volume.spacing_x,
+            spacing_y=p.volume.spacing_y,
+            spacing_z=p.volume.spacing_z,
+        )
+        nrrd_params = NrrdParams()
 
-                if components > 1:
-                    f.write("dimension: 4\n")
-                    f.write(f"sizes: {components} {width} {height} {depth}\n")
-                    f.write(
-                        f"space directions: none ({self.spacing_x},0,0) "
-                        f"(0,{self.spacing_y},0) (0,0,{self.spacing_z})\n"
-                    )
-                    f.write("kinds: vector domain domain domain\n")
-                else:
-                    f.write("dimension: 3\n")
-                    f.write(f"sizes: {width} {height} {depth}\n")
-                    f.write(
-                        f"space directions: ({self.spacing_x},0,0) "
-                        f"(0,{self.spacing_y},0) (0,0,{self.spacing_z})\n"
-                    )
-                    f.write("kinds: domain domain domain\n")
-
-                f.write(
-                    f"endian: {'little' if self.endianness == 'Little endian' else 'big'}\n"
-                )
-                f.write("encoding: raw\n")
-                f.write("space origin: (0,0,0)\n")
-                f.write("\n")
-
-            # Append binary data
-            with open(output_path, "ab") as f:
-                base_dtype_map = {
-                    "8 bit unsigned": np.uint8,
-                    "8 bit signed": np.int8,
-                    "16 bit unsigned": np.uint16,
-                    "16 bit signed": np.int16,
-                    "float": np.float32,
-                    "double": np.float64,
-                    "24 bit RGB": np.uint8,
-                }
-                base_dtype = base_dtype_map[self.pixel_type]
-
-                data_to_save = data.astype(base_dtype, copy=False)
-                if (
-                    self.endianness == "Big endian"
-                    and data_to_save.dtype.itemsize > 1
-                ):
-                    data_to_save = data_to_save.byteswap().newbyteorder()
-
-                if components > 1:
-                    data_to_save = np.moveaxis(data_to_save, -1, 0)
-
-                f.write(data_to_save.tobytes())
-
-        except Exception as e:
-            raise Exception(f"Failed to save NRRD file: {str(e)}")
+        save_nrrd_shared(
+            output_path,
+            data,
+            volume_params,
+            nrrd_params,
+        )
 
     def _normalize_to_uint8(self, arr: np.ndarray) -> np.ndarray:
         """Normalize any numeric array to uint8 [0, 255]"""
@@ -866,8 +344,9 @@ class BatchImageProcessor:
             components = 1
 
         # Calculate scaling for correct aspect ratio
-        scale_x = self.spacing_x if self.spacing_x > 0 else 1.0
-        scale_y = self.spacing_y if self.spacing_y > 0 else 1.0
+        p = self.params
+        scale_x = p.volume.spacing_x if p.volume.spacing_x > 0 else 1.0
+        scale_y = p.volume.spacing_y if p.volume.spacing_y > 0 else 1.0
 
         min_scale = min(scale_x, scale_y)
         if min_scale > 0:

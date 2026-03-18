@@ -1,7 +1,7 @@
 __pycache__/
 data/
 out/
-scripts/build
-scripts/dist
+3d_scraper/build
+3d_scraper/dist
 *.specdist/
 *spec
