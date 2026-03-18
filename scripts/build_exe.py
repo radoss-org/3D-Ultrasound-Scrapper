@@ -5,10 +5,11 @@ Creates standalone .exe files using PyInstaller
 """
 
 import os
-import sys
-import subprocess
 import shutil
+import subprocess
+import sys
 from pathlib import Path
+
 
 def run_command(cmd, description):
     """Run a command and handle errors"""
@@ -16,7 +17,9 @@ def run_command(cmd, description):
     print(f"Running: {' '.join(cmd)}")
 
     try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        result = subprocess.run(
+            cmd, check=True, capture_output=True, text=True
+        )
         print(f"✓ {description} completed successfully")
         return True
     except subprocess.CalledProcessError as e:
@@ -24,19 +27,26 @@ def run_command(cmd, description):
         print(f"Error: {e.stderr}")
         return False
 
+
 def check_pyinstaller():
     """Check if PyInstaller is installed"""
     try:
-        subprocess.run([sys.executable, "-m", "PyInstaller", "--version"], check=True, capture_output=True)
+        subprocess.run(
+            [sys.executable, "-m", "PyInstaller", "--version"],
+            check=True,
+            capture_output=True,
+        )
         return True
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False
+
 
 def install_pyinstaller():
     """Install PyInstaller"""
     print("\nPyInstaller not found. Installing...")
     cmd = [sys.executable, "-m", "pip", "install", "pyinstaller"]
     return run_command(cmd, "Installing PyInstaller")
+
 
 def clean_build_dirs():
     """Clean previous build directories"""
@@ -52,42 +62,64 @@ def clean_build_dirs():
         print(f"Removing {spec_file}...")
         spec_file.unlink()
 
+
 def build_main_app():
     """Build the main 3D Ultrasound Scrapper application"""
     cmd = [
-        sys.executable, "-m", "PyInstaller",
+        sys.executable,
+        "-m",
+        "PyInstaller",
         "--onefile",
         "--windowed",
-        "--name", "3D_Ultrasound_Scrapper",
-        "--icon", "NONE",  # You can add an .ico file path here if you have one
-        "--hidden-import", "scipy",
-        "--hidden-import", "scipy.ndimage",
-        "--hidden-import", "matplotlib.backends.backend_qt5agg",
-        "--hidden-import", "PyQt5.QtCore",
-        "--hidden-import", "PyQt5.QtWidgets",
-        "--hidden-import", "PyQt5.QtGui",
-        "test.py"
+        "--name",
+        "3D_Ultrasound_Scrapper",
+        "--icon",
+        "NONE",  # You can add an .ico file path here if you have one
+        "--hidden-import",
+        "scipy",
+        "--hidden-import",
+        "scipy.ndimage",
+        "--hidden-import",
+        "matplotlib.backends.backend_qt5agg",
+        "--hidden-import",
+        "PyQt5.QtCore",
+        "--hidden-import",
+        "PyQt5.QtWidgets",
+        "--hidden-import",
+        "PyQt5.QtGui",
+        "main.py",
     ]
 
     return run_command(cmd, "Building main application")
 
+
 def build_batch_processor():
     """Build the batch processor application"""
     cmd = [
-        sys.executable, "-m", "PyInstaller",
+        sys.executable,
+        "-m",
+        "PyInstaller",
         "--onefile",
         "--windowed",
-        "--name", "3D_Ultrasound_Scrapper_Batch",
-        "--icon", "NONE",  # You can add an .ico file path here if you have one
-        "--hidden-import", "scipy",
-        "--hidden-import", "scipy.ndimage",
-        "--hidden-import", "PyQt5.QtCore",
-        "--hidden-import", "PyQt5.QtWidgets",
-        "--hidden-import", "PyQt5.QtGui",
-        "batch_processor.py"
+        "--name",
+        "3D_Ultrasound_Scrapper_Batch",
+        "--icon",
+        "NONE",  # You can add an .ico file path here if you have one
+        "--hidden-import",
+        "scipy",
+        "--hidden-import",
+        "scipy.ndimage",
+        "--hidden-import",
+        "PyQt5.QtCore",
+        "--hidden-import",
+        "PyQt5.QtWidgets",
+        "--hidden-import",
+        "PyQt5.QtGui",
+        "batch_processor.py",
     ]
 
     return run_command(cmd, "Building batch processor")
+
 
 def create_dist_folder():
     """Create a clean distribution folder"""
@@ -108,6 +140,7 @@ def create_dist_folder():
 
     return dist_folder
 
+
 def main():
     """Main build process"""
     print("=" * 60)
@@ -115,7 +148,7 @@ def main():
     print("=" * 60)
 
     # Get the directory where this script is located
-    script_dir = Path(__file__).parent.absolute()
+    script_dir = Path(__file__).parent.parent.absolute() / "3d_scraper"
     print(f"Script location: {script_dir}")
 
     # Change to the script directory so PyInstaller can find the Python files
@@ -125,12 +158,19 @@ def main():
 
     try:
         # Check if required files exist in the script directory
-        required_files = ["test.py", "batch_processor.py"]
+        required_files = [
+            "main.py",
+            "batch_processor.py",
+        ]
         missing_files = [f for f in required_files if not os.path.exists(f)]
 
         if missing_files:
-            print(f"✗ Missing required files in {script_dir}: {', '.join(missing_files)}")
-            print("Make sure test.py and batch_processor.py are in the scripts directory")
+            print(
+                f"✗ Missing required files in {script_dir}: {', '.join(missing_files)}"
+            )
+            print(
+                "Make sure main.py and batch_processor.py are in the 3d_scraper directory"
+            )
             sys.exit(1)
 
         # Check and install PyInstaller if needed
@@ -168,8 +208,12 @@ def main():
                     print(f"  - {file.name} ({size_mb:.1f} MB)")
 
             print("\nUsage:")
-            print("  - Run 3D_Ultrasound_Scrapper.exe for the main application")
-            print("  - Run 3D_Ultrasound_Scrapper_Batch.exe for batch processing")
+            print(
+                "  - Run 3D_Ultrasound_Scrapper.exe for the main application"
+            )
+            print(
+                "  - Run 3D_Ultrasound_Scrapper_Batch.exe for batch processing"
+            )
             print("  - Use example_config.json as a starting template")
 
         else:
@@ -182,6 +226,7 @@ def main():
     finally:
         # Always return to the original directory
         os.chdir(original_cwd)
+
 
 if __name__ == "__main__":
     main()
